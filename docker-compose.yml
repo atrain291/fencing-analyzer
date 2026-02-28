@@ -1,0 +1,97 @@
+services:
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    networks:
+      - fencing
+
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - fencing
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build: ./worker
+    volumes:
+      - ./worker:/app
+      - uploads:/app/uploads
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    networks:
+      - fencing
+    # Podman GPU passthrough via CDI (nvidia-container-toolkit must be configured)
+    # Run: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml  (once)
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+    command: celery -A app.celery_app worker --loglevel=info --queues=video_pipeline
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fencing}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fencing}
+      POSTGRES_DB: ${POSTGRES_DB:-fencing_analyzer}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - fencing
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - fencing
+
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - fencing
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:
+  uploads:
+
+networks:
+  fencing:
+    driver: bridge
