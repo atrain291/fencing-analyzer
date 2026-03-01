@@ -16,15 +16,24 @@ Full spec: `documents/fencing_analyzer_architecture.docx`
 
 ---
 
-## Current State (as of 2026-02-28)
+## Current State (as of 2026-03-01)
 
 ### Done
 - Full project scaffold committed and pushed to GitHub: https://github.com/atrain291/fencing-analyzer
 - Git identity: `atrain291` / `atrain291@gmail.com`
 - Project lives on external drive: `/run/media/adeitz/63A504213DF71637/fencing-visualizer/`
 - `git config core.fileMode false` set (NTFS drive — needed to suppress false file mode changes)
+- **Stage 1 skeleton overlay feature — code complete** (all 4 files below wired up and committed)
 
-### Containers built successfully
+### Stage 1 code changes (committed this session)
+| File | Change |
+|---|---|
+| `worker/app/models/__init__.py` | Fixed broken imports: `worker.app.models.*` → `app.models.*` |
+| `backend/app/schemas/bout.py` | Added `FrameRead` schema + `frames: list[FrameRead]` on `BoutRead` |
+| `frontend/src/api/bouts.ts` | Added `Keypoint`, `Frame`, `Bout` TypeScript interfaces + `getBout()` |
+| `frontend/src/pages/VideoReview.tsx` | Full COCO 17-pt skeleton canvas overlay (fencer=orange, opponent=blue) |
+
+### Containers built successfully (old state — need rebuild after storage fix)
 - `localhost/fencing-visualizer_frontend:latest` (React + Vite + Tailwind)
 - `localhost/fencing-visualizer_api:latest` (FastAPI)
 - Postgres, Redis, Ollama images: pulled fine
@@ -33,10 +42,10 @@ Full spec: `documents/fencing_analyzer_architecture.docx`
 - **Blocker: `/var/home` partition is 97% full (4.3GB free)**
 - `docker.io/pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime` needs ~8GB to unpack
 - Podman stores image layers in `~/.local/share/containers/storage/` on `/var/home` (110GB SSD)
-- Fix: redirect Podman storage to external drive (1.1TB free)
+- **Fix ready — see Step 1 below**
 
 ### Services — NOT running yet
-- No containers started; need to resolve worker build first (or start without worker)
+- No containers started; need to apply Podman storage fix first, then rebuild
 
 ---
 
@@ -73,6 +82,7 @@ Full spec: `documents/fencing_analyzer_architecture.docx`
 
 ### 1. Fix Podman storage location (unblocks worker build)
 ```bash
+# Redirect image storage to external drive
 mkdir -p ~/.config/containers
 cat > ~/.config/containers/storage.conf << 'EOF'
 [storage]
@@ -80,9 +90,13 @@ driver = "overlay"
 graphroot = "/run/media/adeitz/63A504213DF71637/podman-storage"
 runroot = "/run/user/1000/containers"
 EOF
-# Then rebuild worker:
+
+# Wipe old image cache on /var/home to free space (~4GB recovered)
+podman system reset --force
+
+# Rebuild all images from scratch (now stored on external drive)
 cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
-podman-compose build worker
+podman-compose build
 ```
 
 ### 2. Add Anthropic API key
@@ -100,13 +114,19 @@ podman-compose run --rm api alembic upgrade head
 
 ### 4. Start all services
 ```bash
-podman-compose up --build
+podman-compose up
 ```
 
-### 5. Stage 1 completion — wire skeleton overlay
-- Backend: `GET /api/bouts/{id}` needs to return frame keypoints
-- Frontend: `VideoReview.tsx` canvas overlay needs to draw skeleton from keypoint data
-- Worker: pose estimation writes to DB — frontend polls and renders
+### 5. Test Stage 1 end-to-end
+- Upload a bout video via Dashboard
+- Wait for processing (poll ProcessingStatus page)
+- Open VideoReview — confirm skeleton overlay renders on video playback
+- Check coaching feedback is generated
+
+### 6. GPU CDI (if worker/ollama containers fail to see GPU)
+```bash
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
 
 ---
 
@@ -114,7 +134,7 @@ podman-compose up --build
 
 | Stage | Status | Description |
 |---|---|---|
-| 1 | 🔧 In progress | Video upload, pose estimation, skeleton overlay, Claude API feedback |
+| 1 | ✅ Code complete (untested — needs containers up) | Video upload, pose estimation, skeleton overlay, Claude API feedback |
 | 2 | ⬜ Pending | Guard detection, blade axis, 2D tip trajectory |
 | 3 | ⬜ Pending | Depth estimation, 3D tip, blade flex physics |
 | 4 | ⬜ Pending | Threat analysis, correction cost, cone of commitment |

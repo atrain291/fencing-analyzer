@@ -1,5 +1,31 @@
 import api from './client'
 
+export interface Keypoint {
+  x: number
+  y: number
+  z: number
+  confidence: number
+}
+
+export interface Frame {
+  id: number
+  timestamp_ms: number
+  fencer_pose: Record<string, Keypoint>
+  opponent_pose: Record<string, Keypoint> | null
+}
+
+export interface Bout {
+  id: number
+  session_id: number
+  status: string
+  result: string | null
+  video_url: string | null
+  duration_ms: number | null
+  pipeline_progress: { stage?: string; pct?: number }
+  created_at: string
+  frames: Frame[]
+}
+
 export interface BoutStatus {
   bout_id: number
   status: string
@@ -32,5 +58,10 @@ export async function uploadVideo(
 
 export async function getBoutStatus(boutId: number): Promise<BoutStatus> {
   const { data } = await api.get<BoutStatus>(`/bouts/${boutId}/status`)
+  return data
+}
+
+export async function getBout(boutId: number): Promise<Bout> {
+  const { data } = await api.get<Bout>(`/bouts/${boutId}`)
   return data
 }
