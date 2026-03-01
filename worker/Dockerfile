@@ -19,7 +19,6 @@ RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.9 \
     anthropic==0.40.0 \
     httpx==0.27.2 \
-    numpy==2.1.1 \
     opencv-python-headless==4.10.0.84 \
     ffmpeg-python==0.2.0
 

@@ -58,20 +58,24 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fencing}
       POSTGRES_DB: ${POSTGRES_DB:-fencing_analyzer}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /var/home/adeitz/fencing-data/postgres:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     networks:
       - fencing
+    security_opt:
+      - label=disable
 
   redis:
     image: docker.io/library/redis:7-alpine
     volumes:
-      - redis_data:/data
+      - /var/home/adeitz/fencing-data/redis:/data
     ports:
       - "6379:6379"
     networks:
       - fencing
+    security_opt:
+      - label=disable
 
   ollama:
     image: docker.io/ollama/ollama:latest
@@ -87,8 +91,6 @@ services:
       - label=disable
 
 volumes:
-  postgres_data:
-  redis_data:
   ollama_data:
   uploads:
 

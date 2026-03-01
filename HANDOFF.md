@@ -16,36 +16,71 @@ Full spec: `documents/fencing_analyzer_architecture.docx`
 
 ---
 
-## Current State (as of 2026-03-01)
+## Current State (as of 2026-03-01, session 2)
 
 ### Done
 - Full project scaffold committed and pushed to GitHub: https://github.com/atrain291/fencing-analyzer
 - Git identity: `atrain291` / `atrain291@gmail.com`
 - Project lives on external drive: `/run/media/adeitz/63A504213DF71637/fencing-visualizer/`
 - `git config core.fileMode false` set (NTFS drive — needed to suppress false file mode changes)
-- **Stage 1 skeleton overlay feature — code complete** (all 4 files below wired up and committed)
+- **Stage 1 skeleton overlay feature — code complete and committed**
+- **Podman storage redirected to external drive** (`~/.config/containers/storage.conf`)
+- **All images built** (frontend, api, worker, postgres, redis pulled)
+- **DB migrations generated and applied** — 9 tables created
+- **Frontend running** via `npm run dev` on port 5173
+- **postgres, redis, api containers running**
 
-### Stage 1 code changes (committed this session)
-| File | Change |
-|---|---|
-| `worker/app/models/__init__.py` | Fixed broken imports: `worker.app.models.*` → `app.models.*` |
-| `backend/app/schemas/bout.py` | Added `FrameRead` schema + `frames: list[FrameRead]` on `BoutRead` |
-| `frontend/src/api/bouts.ts` | Added `Keypoint`, `Frame`, `Bout` TypeScript interfaces + `getBout()` |
-| `frontend/src/pages/VideoReview.tsx` | Full COCO 17-pt skeleton canvas overlay (fencer=orange, opponent=blue) |
+### What was happening when session ended
+- User uploaded a bout video and it was stuck at "queued / 0%"
+- Root cause: **Celery worker container was not started**
+- `podman-compose up -d worker` was just issued but interrupted
 
-### Containers built successfully (old state — need rebuild after storage fix)
-- `localhost/fencing-visualizer_frontend:latest` (React + Vite + Tailwind)
-- `localhost/fencing-visualizer_api:latest` (FastAPI)
-- Postgres, Redis, Ollama images: pulled fine
+### IMMEDIATE NEXT STEP: Start the worker
+```bash
+cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
+podman-compose up -d worker
+```
+Then watch logs to confirm it picks up the queued job:
+```bash
+podman logs -f fencing-visualizer_worker_1
+```
 
-### Worker image — NOT built yet
-- **Blocker: `/var/home` partition is 97% full (4.3GB free)**
-- `docker.io/pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime` needs ~8GB to unpack
-- Podman stores image layers in `~/.local/share/containers/storage/` on `/var/home` (110GB SSD)
-- **Fix ready — see Step 1 below**
+---
 
-### Services — NOT running yet
-- No containers started; need to apply Podman storage fix first, then rebuild
+## How to Restore the Full Dev Environment
+
+### 1. Start containers (postgres, redis, api, worker)
+```bash
+cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
+podman-compose up -d postgres redis api worker
+```
+
+### 2. Start frontend dev server
+```bash
+cd /run/media/adeitz/63A504213DF71637/fencing-visualizer/frontend
+npm run dev
+```
+Frontend: http://localhost:5173 (or http://192.168.1.197:5173 over network)
+API: http://localhost:8000
+
+### 3. Verify everything is up
+```bash
+podman ps
+```
+Should show: postgres_1, redis_1, api_1, worker_1
+
+---
+
+## Podman / Storage Fix (already applied — for reference)
+
+- Podman image storage redirected to external drive: `~/.config/containers/storage.conf`
+  - `graphroot = "/run/media/adeitz/63A504213DF71637/podman-storage"`
+- **Named volumes for postgres/redis were broken** (NTFS + SELinux + rootless UID mapping issues)
+- **Fix applied in docker-compose.yml**: switched to bind mounts on `/var/home/adeitz/fencing-data/`
+  - postgres data: `/var/home/adeitz/fencing-data/postgres`
+  - redis data: `/var/home/adeitz/fencing-data/redis`
+- Both postgres and redis have `security_opt: label=disable` (SELinux fix for Bazzite)
+- Bind mount dirs already created with correct ownership — **do not delete them**
 
 ---
 
@@ -70,63 +105,11 @@ Full spec: `documents/fencing_analyzer_architecture.docx`
 ## Environment Details
 
 - **OS:** Bazzite (Fedora immutable) on `sda` (110GB)
-- **Home partition:** `/var/home` — `sda3`, 110GB, currently 97% full
+- **Home partition:** `/var/home` — `sda3`, 110GB, ~25GB free
 - **External drive:** `/run/media/adeitz/63A504213DF71637/` — 1.9TB NTFS, ~1.1TB free
 - **Podman compose:** `podman-compose` via linuxbrew at `/home/linuxbrew/.linuxbrew/bin/podman-compose`
 - **GPU passthrough:** CDI-based (`devices: [nvidia.com/gpu=all]` in compose)
-- **ANTHROPIC_API_KEY:** needs to be set in `.env` (not committed)
-
----
-
-## Immediate Next Steps
-
-### 1. Fix Podman storage location (unblocks worker build)
-```bash
-# Redirect image storage to external drive
-mkdir -p ~/.config/containers
-cat > ~/.config/containers/storage.conf << 'EOF'
-[storage]
-driver = "overlay"
-graphroot = "/run/media/adeitz/63A504213DF71637/podman-storage"
-runroot = "/run/user/1000/containers"
-EOF
-
-# Wipe old image cache on /var/home to free space (~4GB recovered)
-podman system reset --force
-
-# Rebuild all images from scratch (now stored on external drive)
-cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
-podman-compose build
-```
-
-### 2. Add Anthropic API key
-```bash
-# Edit .env — add your key:
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-### 3. Run database migrations
-```bash
-cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
-podman-compose up -d postgres
-podman-compose run --rm api alembic upgrade head
-```
-
-### 4. Start all services
-```bash
-podman-compose up
-```
-
-### 5. Test Stage 1 end-to-end
-- Upload a bout video via Dashboard
-- Wait for processing (poll ProcessingStatus page)
-- Open VideoReview — confirm skeleton overlay renders on video playback
-- Check coaching feedback is generated
-
-### 6. GPU CDI (if worker/ollama containers fail to see GPU)
-```bash
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-```
+- **ANTHROPIC_API_KEY:** needs to be set in `.env` (not committed) — check if set before testing LLM features
 
 ---
 
@@ -134,7 +117,7 @@ sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
 | Stage | Status | Description |
 |---|---|---|
-| 1 | ✅ Code complete (untested — needs containers up) | Video upload, pose estimation, skeleton overlay, Claude API feedback |
+| 1 | ✅ Code complete — worker not yet tested end-to-end | Video upload, pose estimation, skeleton overlay, Claude API feedback |
 | 2 | ⬜ Pending | Guard detection, blade axis, 2D tip trajectory |
 | 3 | ⬜ Pending | Depth estimation, 3D tip, blade flex physics |
 | 4 | ⬜ Pending | Threat analysis, correction cost, cone of commitment |
@@ -149,7 +132,7 @@ sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 ```
 fencing-visualizer/
 ├── HANDOFF.md                          ← you are here
-├── docker-compose.yml                  ← Podman-compatible, CDI GPU
+├── docker-compose.yml                  ← Podman-compatible, CDI GPU, bind mounts for pg/redis
 ├── .env                                ← secrets (not in git) — add ANTHROPIC_API_KEY
 ├── .env.example                        ← template
 ├── documents/
@@ -158,7 +141,7 @@ fencing-visualizer/
 │   ├── app/main.py                     ← FastAPI entry point
 │   ├── app/models/                     ← SQLAlchemy ORM models
 │   ├── app/api/routes/                 ← upload.py, bouts.py, fencers.py
-│   └── alembic/                        ← DB migrations
+│   └── alembic/versions/               ← initial migration generated and applied
 ├── worker/
 │   ├── app/tasks/video_pipeline.py     ← main pipeline orchestrator
 │   └── app/pipeline/
@@ -176,7 +159,9 @@ fencing-visualizer/
 
 ## Known Issues / Notes
 
-- **NTFS drive**: `git config core.fileMode false` already set; dotfiles work fine on this NTFS volume
-- **Worker models/__init__.py**: has an incorrect import path (`from worker.app.models...`) — should be `from app.models...` — fix before running
-- **Podman short names**: all Dockerfiles and compose use fully-qualified image names (`docker.io/...`) to avoid Bazzite's short-name resolution enforcement
-- **No GPU CDI setup yet**: may need `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` before worker/ollama GPU containers work
+- **SELinux on Bazzite**: all containers that use bind mounts need `security_opt: label=disable`
+- **Rootless Podman + bind mounts**: named volumes had UID-mapping issues; switched to bind mounts on `/var/home/adeitz/fencing-data/` which is ext4 and supports POSIX permissions
+- **Bind mount dirs**: `/var/home/adeitz/fencing-data/postgres` and `/var/home/adeitz/fencing-data/redis` — owned correctly, do not delete
+- **GPU CDI**: may need `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` if worker/ollama can't see GPU
+- **Ollama not started**: not needed until LLM coaching feedback is tested
+- **NTFS drive**: `git config core.fileMode false` already set
