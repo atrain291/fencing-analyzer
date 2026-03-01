@@ -30,6 +30,14 @@ uploads/
 *.mov
 *.avi
 
+# ML model weights
+*.pt
+*.pth
+*.onnx
+
+# Claude Code
+.claude/settings.local.json
+
 # IDE
 .vscode/
 .idea/
