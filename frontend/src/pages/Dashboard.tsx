@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Upload, User, AlertCircle } from 'lucide-react'
 import { listFencers, createFencer, type Fencer } from '@/api/fencers'
-import { uploadVideo } from '@/api/bouts'
+import { uploadVideo, deleteBout } from '@/api/bouts'
 import clsx from 'clsx'
 
 export default function Dashboard() {
@@ -13,6 +13,8 @@ export default function Dashboard() {
   const [uploadPct, setUploadPct] = useState<number | null>(null)
   const [error, setError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const boutIdRef = useRef<number | null>(null)
 
   useEffect(() => {
     listFencers().then(setFencers).catch(() => setError('Could not load fencers'))
@@ -35,13 +37,29 @@ export default function Dashboard() {
     if (!file || !selectedFencer) return
     setError('')
     setUploadPct(0)
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
-      const res = await uploadVideo(file, selectedFencer, pct => setUploadPct(pct))
+      const res = await uploadVideo(file, selectedFencer, pct => setUploadPct(pct), controller.signal)
+      boutIdRef.current = res.bout_id
       navigate(`/bouts/${res.bout_id}/processing`)
     } catch {
       setError('Upload failed. Check that the API is running.')
       setUploadPct(null)
     }
+  }
+
+  async function handleCancel() {
+    abortRef.current?.abort()
+    if (boutIdRef.current !== null) {
+      try {
+        await deleteBout(boutIdRef.current)
+      } catch {
+        // ignore cleanup errors
+      }
+      boutIdRef.current = null
+    }
+    setUploadPct(null)
   }
 
   return (
@@ -125,6 +143,14 @@ export default function Dashboard() {
           )}
         </button>
         <input ref={fileRef} type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
+        {uploadPct !== null && (
+          <button
+            onClick={handleCancel}
+            className="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors text-gray-300"
+          >
+            Cancel
+          </button>
+        )}
       </section>
 
       {error && (

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { getBoutStatus, type BoutStatus } from '@/api/bouts'
+import { getBoutStatus, deleteBout, type BoutStatus } from '@/api/bouts'
 import { Loader2, CheckCircle, XCircle } from 'lucide-react'
 
 const STAGE_LABELS: Record<string, string> = {
@@ -65,6 +65,19 @@ export default function ProcessingStatus() {
             />
           </div>
           <p className="text-gray-500 text-sm">{pct}%</p>
+          <button
+            onClick={async () => {
+              try {
+                await deleteBout(Number(boutId))
+              } catch {
+                // ignore errors
+              }
+              navigate('/')
+            }}
+            className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors text-gray-300"
+          >
+            Cancel
+          </button>
         </>
       )}
     </div>

@@ -43,6 +43,7 @@ export async function uploadVideo(
   file: File,
   fencerId: number,
   onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<BoutUploadResponse> {
   const form = new FormData()
   form.append('file', file)
@@ -52,6 +53,7 @@ export async function uploadVideo(
     onUploadProgress: e => {
       if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
     },
+    signal,
   })
   return data
 }
@@ -64,4 +66,8 @@ export async function getBoutStatus(boutId: number): Promise<BoutStatus> {
 export async function getBout(boutId: number): Promise<Bout> {
   const { data } = await api.get<Bout>(`/bouts/${boutId}`)
   return data
+}
+
+export async function deleteBout(boutId: number): Promise<void> {
+  await api.delete(`/bouts/${boutId}`)
 }
