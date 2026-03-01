@@ -13,6 +13,9 @@ services:
       - api
     networks:
       - fencing
+    security_opt:
+      - label=disable
+      - seccomp=unconfined
 
   api:
     build: ./backend
@@ -28,6 +31,9 @@ services:
       - redis
     networks:
       - fencing
+    security_opt:
+      - label=disable
+      - seccomp=unconfined
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:

@@ -11,13 +11,19 @@ Auto-updated by Claude Code approximately every 10 minutes.
 - All Docker images built, DB migrated (9 tables), frontend (5173) + backend (8000) running
 - **Worker container NOT yet started** — videos queue at 0% until worker is up
 
-### Immediate Next Step
-Start the Celery worker from the external drive directory:
+### Container Status (2026-03-01)
+All 6 containers running: postgres (5432), redis (6379), ollama (11434), api (8000), frontend (5173), worker.
+
+### Build Fix — SELinux RELRO Issue
+Bazzite kernel blocks `mprotect()` in rootless Podman builds. Always build images with:
 ```bash
-cd /run/media/adeitz/63A504213DF71637/fencing-visualizer
-podman-compose up -d worker
-podman logs -f fencing-visualizer_worker_1
+podman build --security-opt seccomp=unconfined --security-opt label=disable -t <name> <context-dir>/
 ```
+docker-compose.yml updated to add `security_opt: [label=disable, seccomp=unconfined]` to frontend and api services.
+Start containers with `podman-compose up -d --no-build` (images must be pre-built manually).
+
+### .env File
+Created from .env.example. `ANTHROPIC_API_KEY` is blank — must be filled in for LLM features.
 
 ### Key Architecture Reminder
 - **Source repo**: `/var/home/adeitz/source/fencing-analyzer/`
