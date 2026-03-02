@@ -16,12 +16,7 @@ def _get_model():
     return _model
 
 
-def run_pose_estimation(
-    video_path: str,
-    video_info: dict,
-    bout_id: int,
-    db,
-) -> list[dict]:
+def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None):
     """
     Run YOLOv8-Pose on every frame of the video.
     Persists Frame records to the database and returns a summary list.
@@ -32,6 +27,8 @@ def run_pose_estimation(
     results_summary = []
     frame_idx = 0
     fps = video_info.get("fps", 30)
+    duration = video_info.get("duration", 0)
+    total_frames_hint = int(fps * duration) if duration else 0
 
     for result in model.track(video_path, stream=True, device="cuda"):
         timestamp_ms = int((frame_idx / fps) * 1000)
@@ -58,6 +55,9 @@ def run_pose_estimation(
 
         results_summary.append({"frame": frame_idx, "timestamp_ms": timestamp_ms})
         frame_idx += 1
+
+        if progress_callback and frame_idx % 100 == 0:
+            progress_callback(frame_idx, total_frames_hint)
 
         # Commit in batches to avoid huge transactions
         if frame_idx % 300 == 0:

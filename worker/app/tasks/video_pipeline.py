@@ -39,13 +39,31 @@ STAGES = [
 ]
 
 
-def _update_progress(bout_id: int, stage: str, pct: int, db):
-    from app.models import Bout  # local import to avoid circular issues
+def _update_progress(bout_id: int, stage: str, pct: int, db, extra: dict | None = None):
+    import psutil
+    import torch
+
+    metrics = {}
+    try:
+        metrics["cpu_pct"] = psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
+    try:
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(0)
+            total = torch.cuda.get_device_properties(0).total_memory
+            metrics["gpu_mem_pct"] = round(allocated / total * 100, 1)
+    except Exception:
+        pass
+
+    progress = {"stage": stage, "pct": pct, **metrics, **(extra or {})}
+
+    from app.models import Bout
     bout = db.query(Bout).get(bout_id)
     if bout:
-        bout.pipeline_progress = {"stage": stage, "pct": pct}
+        bout.pipeline_progress = progress
         db.commit()
-    current_task.update_state(state="PROGRESS", meta={"stage": stage, "pct": pct})
+    current_task.update_state(state="PROGRESS", meta=progress)
 
 
 @celery_app.task(name="worker.tasks.video_pipeline.run_pipeline", bind=True)
@@ -68,7 +86,18 @@ def run_pipeline(self, bout_id: int, video_path: str):
 
             # Stage 2 — Pose estimation
             _update_progress(bout_id, "pose_estimation", 20, db)
-            pose_results = run_pose_estimation(video_path, video_info, bout_id, db)
+
+            def pose_progress(frame_idx: int, total_frames: int):
+                if total_frames > 0:
+                    frame_pct = frame_idx / total_frames
+                    pct = int(20 + frame_pct * 63)  # scale 20→83
+                else:
+                    pct = 20
+                _update_progress(bout_id, "pose_estimation", pct, db,
+                                 extra={"frame": frame_idx, "total_frames": total_frames})
+
+            pose_results = run_pose_estimation(video_path, video_info, bout_id, db,
+                                               progress_callback=pose_progress)
             logger.info("Pose estimation complete: %d frames", len(pose_results))
 
             # Stage 3 — LLM synthesis (Stage 1 deliverable)

@@ -14,6 +14,15 @@ export interface Frame {
   opponent_pose: Record<string, Keypoint> | null
 }
 
+export interface PipelineProgress {
+  stage?: string
+  pct?: number
+  frame?: number
+  total_frames?: number
+  gpu_mem_pct?: number
+  cpu_pct?: number
+}
+
 export interface Bout {
   id: number
   session_id: number
@@ -21,7 +30,7 @@ export interface Bout {
   result: string | null
   video_url: string | null
   duration_ms: number | null
-  pipeline_progress: { stage?: string; pct?: number }
+  pipeline_progress: PipelineProgress
   created_at: string
   frames: Frame[]
 }
@@ -29,7 +38,7 @@ export interface Bout {
 export interface BoutStatus {
   bout_id: number
   status: string
-  pipeline_progress: { stage?: string; pct?: number }
+  pipeline_progress: PipelineProgress
   error?: string
 }
 
