@@ -25,6 +25,41 @@ Start containers with `podman-compose up -d --no-build` (images must be pre-buil
 ### .env File
 Created from .env.example. `ANTHROPIC_API_KEY` is blank — must be filled in for LLM features.
 
+### Worker Restart Protocol
+Always clear Python bytecode cache before restarting or code changes won't load:
+```bash
+podman exec fencing-analyzer_worker_1 find /app -name "*.pyc" -delete
+podman restart fencing-analyzer_worker_1
+```
+If a bout was in-progress when worker restarted, reset it manually:
+```bash
+# In postgres container
+DELETE FROM frames WHERE bout_id = <id>;
+UPDATE bouts SET status='queued', pipeline_progress='{"stage":"queued","pct":0}', task_id=NULL WHERE id=<id>;
+# In api container
+python3 -c "from app.tasks import dispatch_pipeline; t=dispatch_pipeline(<id>,'/app/uploads/<key>.mp4'); print(t.id)"
+# Then update task_id in DB
+```
+
+---
+
+## Session 2 Summary — 2026-03-01
+
+### Features Completed
+- Cancel upload mid-flight + cancel/delete processing bout
+- Skeleton overlay: rAF loop, binary search frame lookup, keypoint interpolation
+- Granular pipeline progress: weighted stage bars, frame counter, GPU/CPU bars, ETA estimate
+- Total frames reported from ingest stage immediately (nb_frames from ffprobe)
+- NVDEC hardware video decoding (ffmpeg pipe, hevc_cuvid/h264_cuvid auto-selection)
+- Slow motion playback buttons (0.25×, 0.5×, 1×, 2×)
+- Wider video layout + fullscreen with canvas overlay preserved (ResizeObserver)
+- SAM-Body4D added to architecture doc as Section 17
+
+### Known Gotchas
+- `ffprobe -count_packets` broken in ffmpeg 4.4 — using `nb_frames` instead
+- Video file for bout #12 (4K HEVC, 9753 frames) was lost from external drive — deleted from DB
+- Bout #17 was processed successfully with 1080p 30fps video (12s, hevc)
+
 ### Key Architecture Reminder
 - **Source repo**: `/var/home/adeitz/source/fencing-analyzer/`
 - **Runtime (podman-compose)**: `/run/media/adeitz/63A504213DF71637/fencing-visualizer/`
