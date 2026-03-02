@@ -19,60 +19,52 @@ def _get_model():
     return _model
 
 
-def _bbox_iou_center(det_box, roi_box):
-    """Check if detection center falls within ROI bounding box.
-    det_box: [x1, y1, x2, y2] in normalized coords (from YOLO)
-    roi_box: dict {x1, y1, x2, y2} in normalized coords (from user)
-    Returns True if detection center is inside ROI.
+def _center_in_bbox(cx: float, cy: float, bbox: dict) -> bool:
+    """Check if point (cx, cy) falls inside a normalized bbox {x1,y1,x2,y2}."""
+    return bbox['x1'] <= cx <= bbox['x2'] and bbox['y1'] <= cy <= bbox['y2']
+
+
+def _try_lock_id(result, bbox: dict, exclude_id: int | None) -> int | None:
     """
-    cx = (det_box[0] + det_box[2]) / 2
-    cy = (det_box[1] + det_box[3]) / 2
-    return (roi_box['x1'] <= cx <= roi_box['x2'] and
-            roi_box['y1'] <= cy <= roi_box['y2'])
-
-
-def _assign_detections(result, fencer_bbox, opponent_bbox):
-    """Assign YOLO detections to fencer/opponent roles using ROI boxes.
-    Falls back to kps[0]=fencer, kps[1]=opponent if no ROI specified.
-    Returns (fencer_kps, fencer_conf, opponent_kps, opponent_conf) or Nones.
+    Try to lock a tracker ID from the current frame using an ROI bbox.
+    Returns the tracker ID of the first detection whose center falls in bbox,
+    excluding exclude_id (so fencer and opponent don't get the same ID).
+    Returns None if no match found or tracking IDs unavailable.
     """
-    if result.keypoints is None or len(result.keypoints) == 0:
-        return None, None, None, None
+    if result.boxes is None or result.boxes.id is None:
+        return None
+    track_ids = result.boxes.id.cpu().numpy().astype(int)
+    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
+    for i, tid in enumerate(track_ids):
+        if exclude_id is not None and tid == exclude_id:
+            continue
+        if i >= len(boxes_xyxyn):
+            break
+        box = boxes_xyxyn[i]
+        cx = (box[0] + box[2]) / 2
+        cy = (box[1] + box[3]) / 2
+        if _center_in_bbox(cx, cy, bbox):
+            return int(tid)
+    return None
 
+
+def _get_kps_by_id(result, track_id: int):
+    """
+    Return (kps_array, conf_array) for the detection with the given tracker ID.
+    Returns (None, None) if the ID is not present in this frame.
+    """
+    if result.boxes is None or result.boxes.id is None:
+        return None, None
+    track_ids = result.boxes.id.cpu().numpy().astype(int)
     kps_all = result.keypoints.xyn.cpu().numpy()
     conf_all = (result.keypoints.conf.cpu().numpy()
                 if result.keypoints.conf is not None else None)
-
-    # If no ROI specified, use index order (existing behavior)
-    if fencer_bbox is None and opponent_bbox is None:
-        fencer_kps = kps_all[0] if len(kps_all) >= 1 else None
-        fencer_conf = conf_all[0] if conf_all is not None and len(conf_all) >= 1 else None
-        opp_kps = kps_all[1] if len(kps_all) >= 2 else None
-        opp_conf = conf_all[1] if conf_all is not None and len(conf_all) >= 2 else None
-        return fencer_kps, fencer_conf, opp_kps, opp_conf
-
-    # Get normalized bounding boxes for each detection
-    fencer_kps = fencer_conf = opp_kps = opp_conf = None
-
-    if result.boxes is not None and len(result.boxes) > 0:
-        boxes_norm = result.boxes.xyxyn.cpu().numpy()  # normalized [x1,y1,x2,y2]
-
-        for i, det_box in enumerate(boxes_norm):
-            if i >= len(kps_all):
-                break
-            kps = kps_all[i]
-            conf = conf_all[i] if conf_all is not None else None
-
-            if fencer_bbox is not None and fencer_kps is None:
-                if _bbox_iou_center(det_box, fencer_bbox):
-                    fencer_kps, fencer_conf = kps, conf
-
-            if opponent_bbox is not None and opp_kps is None:
-                if _bbox_iou_center(det_box, opponent_bbox):
-                    opp_kps, opp_conf = kps, conf
-
-    # Fallback: if ROI specified but no match found, return nothing for that role
-    return fencer_kps, fencer_conf, opp_kps, opp_conf
+    for i, tid in enumerate(track_ids):
+        if tid == track_id:
+            kps = kps_all[i] if i < len(kps_all) else None
+            conf = conf_all[i] if conf_all is not None and i < len(conf_all) else None
+            return kps, conf
+    return None, None
 
 
 def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None,
@@ -116,6 +108,11 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     frame_bytes = width * height * 3
     proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 4)
 
+    # Tracker ID locking state (set once per video, persist across frames)
+    fencer_track_id: int | None = None
+    opponent_track_id: int | None = None
+    roi_mode = fencer_bbox is not None or opponent_bbox is not None
+
     try:
         while True:
             raw = proc.stdout.read(frame_bytes)
@@ -131,13 +128,43 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
             fencer_pose = {}
             opponent_pose = {}
 
-            fencer_kps, fencer_conf, opp_kps, opp_conf = _assign_detections(
-                result, fencer_bbox, opponent_bbox
-            )
-            if fencer_kps is not None:
-                fencer_pose = _keypoints_to_dict(fencer_kps, fencer_conf)
-            if opp_kps is not None:
-                opponent_pose = _keypoints_to_dict(opp_kps, opp_conf)
+            if result.keypoints is not None and len(result.keypoints) > 0:
+                if roi_mode:
+                    # Try to lock tracker IDs from ROI (keeps trying each frame until locked)
+                    if fencer_bbox is not None and fencer_track_id is None:
+                        fencer_track_id = _try_lock_id(result, fencer_bbox, None)
+                        if fencer_track_id is not None:
+                            logger.info("Frame %d: locked fencer tracker ID %d",
+                                        frame_idx, fencer_track_id)
+
+                    if opponent_bbox is not None and opponent_track_id is None:
+                        opponent_track_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
+                        if opponent_track_id is not None:
+                            logger.info("Frame %d: locked opponent tracker ID %d",
+                                        frame_idx, opponent_track_id)
+
+                    # Use locked IDs to extract keypoints (ignore all others)
+                    if fencer_track_id is not None:
+                        kps, conf = _get_kps_by_id(result, fencer_track_id)
+                        if kps is not None:
+                            fencer_pose = _keypoints_to_dict(kps, conf)
+
+                    if opponent_track_id is not None:
+                        kps, conf = _get_kps_by_id(result, opponent_track_id)
+                        if kps is not None:
+                            opponent_pose = _keypoints_to_dict(kps, conf)
+
+                else:
+                    # No ROI: fall back to index order (kps[0]=fencer, kps[1]=opponent)
+                    kps_all = result.keypoints.xyn.cpu().numpy()
+                    conf_all = (result.keypoints.conf.cpu().numpy()
+                                if result.keypoints.conf is not None else None)
+                    if len(kps_all) >= 1:
+                        fencer_pose = _keypoints_to_dict(
+                            kps_all[0], conf_all[0] if conf_all is not None else None)
+                    if len(kps_all) >= 2:
+                        opponent_pose = _keypoints_to_dict(
+                            kps_all[1], conf_all[1] if conf_all is not None else None)
 
             db_frame = Frame(
                 bout_id=bout_id,
