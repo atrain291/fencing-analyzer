@@ -42,7 +42,7 @@ export default function Dashboard() {
     try {
       const res = await uploadVideo(file, selectedFencer, pct => setUploadPct(pct), controller.signal)
       boutIdRef.current = res.bout_id
-      navigate(`/bouts/${res.bout_id}/processing`)
+      navigate(`/bouts/${res.bout_id}/configure`)
     } catch {
       setError('Upload failed. Check that the API is running.')
       setUploadPct(null)

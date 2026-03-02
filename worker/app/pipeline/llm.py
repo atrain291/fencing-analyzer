@@ -1,15 +1,19 @@
-"""Stage 1 — LLM coaching synthesis via Claude API."""
+"""Stage 2 — LLM coaching synthesis via Claude API."""
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def synthesize_coaching_feedback(bout_id: int, pose_results: list[dict], db) -> str:
+def synthesize_coaching_feedback(
+    bout_id: int,
+    pose_results: list[dict],
+    action_results: list[dict],
+    db,
+) -> str:
     """
     Generate natural language coaching feedback using Claude.
-    In Stage 1 this is based on pose summary statistics only.
-    Later stages will ground this in blade tracking, threat metrics, etc.
+    Stage 2: includes blade tracking confirmation and action classification summary.
     """
     import anthropic
 
@@ -19,28 +23,43 @@ def synthesize_coaching_feedback(bout_id: int, pose_results: list[dict], db) -> 
         return "Analysis complete. Set ANTHROPIC_API_KEY to enable AI coaching feedback."
 
     total_frames = len(pose_results)
-    duration_s = round(total_frames / 30, 1)  # approximate
+    duration_s = round(total_frames / 30, 1)
+
+    # Summarise detected actions
+    action_counts: dict[str, int] = {}
+    for a in action_results:
+        action_counts[a["type"]] = action_counts.get(a["type"], 0) + 1
+
+    action_summary = ", ".join(
+        f"{count} {atype}{'s' if count != 1 else ''}"
+        for atype, count in sorted(action_counts.items())
+    ) or "none detected"
 
     prompt = f"""You are an expert epee fencing coach analyzing a training bout.
 
 Video summary:
 - Total frames analyzed: {total_frames}
 - Approximate duration: {duration_s} seconds
+- Detected actions: {action_summary}
 
-This is Stage 1 of the analysis pipeline. Full biomechanical data (blade tracking, kinetic chain,
-threat metrics) will be available in later pipeline stages.
+Stage 2 of the analysis pipeline is now complete:
+- Pose skeleton overlay on every frame ✓
+- Blade tip trajectory projected from wrist geometry ✓
+- Rule-based action classification ✓
 
-Based on the fact that pose estimation ran successfully on this video:
-1. Briefly acknowledge the analysis is complete
-2. Explain what the system detected (pose skeleton overlay on every frame)
-3. List what additional analysis will be added as the pipeline matures:
-   - Blade tracking and tip trajectory
-   - Kinetic chain readiness scores
-   - Attack quality metrics and effective distance penalty
-   - Comparison against reference technique skeletons
-4. Provide one piece of general epee coaching advice relevant to beginners
+Upcoming pipeline additions:
+- Depth estimation and 3D blade tracking (Stage 3)
+- Kinetic chain readiness scores (Stage 3)
+- Attack quality metrics and effective distance penalty (Stage 4)
+- Comparison against reference technique skeletons (Stage 5)
 
-Keep the response concise (under 200 words) and encouraging."""
+Based on the detected actions, provide:
+1. A brief acknowledgment that Stage 2 analysis is complete
+2. A short observation about the action patterns detected (advances, retreats, lunges)
+3. One actionable piece of epee coaching advice specific to the action mix observed
+4. An encouraging closing note
+
+Keep the response concise (under 220 words) and coach-like in tone."""
 
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(

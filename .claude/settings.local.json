@@ -20,7 +20,8 @@
       "Bash(python3:*)",
       "Bash(pip install:*)",
       "Bash(podman run:*)",
-      "Bash(podman inspect:*)"
+      "Bash(podman inspect:*)",
+      "Bash(git:*)"
     ]
   }
 }

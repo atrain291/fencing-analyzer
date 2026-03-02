@@ -7,11 +7,19 @@ export interface Keypoint {
   confidence: number
 }
 
+export interface BladeState {
+  tip_xyz: { x: number; y: number; z: number }
+  nominal_xyz: { x: number; y: number; z: number } | null
+  velocity_xyz: { x: number; y: number; z: number }
+  speed: number | null
+}
+
 export interface Frame {
   id: number
   timestamp_ms: number
   fencer_pose: Record<string, Keypoint>
   opponent_pose: Record<string, Keypoint> | null
+  blade_state: BladeState | null
 }
 
 export interface PipelineProgress {
@@ -79,4 +87,27 @@ export async function getBout(boutId: number): Promise<Bout> {
 
 export async function deleteBout(boutId: number): Promise<void> {
   await api.delete(`/bouts/${boutId}`)
+}
+
+export interface Bbox {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+
+export function getThumbnailUrl(boutId: number): string {
+  return `${api.defaults.baseURL}/bouts/${boutId}/thumbnail`
+}
+
+export async function configureROI(
+  boutId: number,
+  fencerBbox: Bbox | null,
+  opponentBbox: Bbox | null,
+): Promise<{ status: string; task_id: string }> {
+  const { data } = await api.post(`/bouts/${boutId}/roi`, {
+    fencer_bbox: fencerBbox,
+    opponent_bbox: opponentBbox,
+  })
+  return data
 }

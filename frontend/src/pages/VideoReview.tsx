@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { getBout, deleteBout, Frame, Keypoint } from '@/api/bouts'
+import { getBout, deleteBout, Frame, Keypoint, BladeState } from '@/api/bouts'
 import { Trash2, Maximize2, Minimize2 } from 'lucide-react'
 
 interface AnalysisSummary {
@@ -62,6 +62,33 @@ function drawSkeleton(
   ctx.globalAlpha = 1
 }
 
+function drawBlade(
+  ctx: CanvasRenderingContext2D,
+  pose: Record<string, Keypoint>,
+  bladeState: BladeState,
+  width: number,
+  height: number
+) {
+  const wrist = pose['right_wrist'] ?? pose['left_wrist']
+  if (!wrist || wrist.confidence < 0.3) return
+
+  const tip = bladeState.tip_xyz
+  ctx.strokeStyle = '#22c55e'
+  ctx.lineWidth = 2
+  ctx.globalAlpha = 0.85
+  ctx.beginPath()
+  ctx.moveTo(wrist.x * width, wrist.y * height)
+  ctx.lineTo(tip.x * width, tip.y * height)
+  ctx.stroke()
+
+  ctx.fillStyle = '#22c55e'
+  ctx.globalAlpha = 1.0
+  ctx.beginPath()
+  ctx.arc(tip.x * width, tip.y * height, 5, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.globalAlpha = 1
+}
+
 function findFrameInterval(
   frames: Frame[],
   timestampMs: number
@@ -111,6 +138,19 @@ function interpolatePose(
     }
   }
   return result
+}
+
+function interpolateBladeState(a: BladeState, b: BladeState, t: number): BladeState {
+  return {
+    tip_xyz: {
+      x: a.tip_xyz.x + (b.tip_xyz.x - a.tip_xyz.x) * t,
+      y: a.tip_xyz.y + (b.tip_xyz.y - a.tip_xyz.y) * t,
+      z: 0,
+    },
+    nominal_xyz: a.nominal_xyz,
+    velocity_xyz: a.velocity_xyz,
+    speed: a.speed,
+  }
 }
 
 export default function VideoReview() {
@@ -189,6 +229,17 @@ export default function VideoReview() {
         ? interpolatePose(a.fencer_pose, b.fencer_pose, t)
         : a.fencer_pose
       drawSkeleton(ctx, pose, canvas.width, canvas.height, '#f97316')
+    }
+
+    // Draw blade overlay (green)
+    if (a.blade_state && a.fencer_pose) {
+      const bladeState = b.blade_state
+        ? interpolateBladeState(a.blade_state, b.blade_state, t)
+        : a.blade_state
+      const pose = b.fencer_pose
+        ? interpolatePose(a.fencer_pose, b.fencer_pose, t)
+        : a.fencer_pose
+      drawBlade(ctx, pose, bladeState, canvas.width, canvas.height)
     }
 
     // Draw opponent skeleton (blue)

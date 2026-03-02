@@ -15,9 +15,11 @@ interface StageDef {
 }
 
 const STAGE_DEFS: StageDef[] = [
-  { key: 'ingest',          label: 'Ingesting video',  description: 'FFprobe metadata extraction',                weight: 5  },
-  { key: 'pose_estimation', label: 'Pose Estimation',  description: 'YOLOv8 skeleton detection · GPU-intensive',  weight: 65 },
-  { key: 'llm_synthesis',   label: 'AI Coaching',      description: 'Generating feedback via Claude API',         weight: 15 },
+  { key: 'ingest',                label: 'Ingesting video',        description: 'FFprobe metadata extraction',                weight: 5  },
+  { key: 'pose_estimation',       label: 'Pose Estimation',        description: 'YOLOv8 skeleton detection · GPU-intensive',  weight: 60 },
+  { key: 'blade_tracking',        label: 'Blade Tracking',         description: 'Epee tip detection and trajectory tracking', weight: 8  },
+  { key: 'action_classification', label: 'Action Classification',  description: 'Classifying fencing actions and footwork',   weight: 7  },
+  { key: 'llm_synthesis',         label: 'AI Coaching',            description: 'Generating feedback via Claude API',         weight: 20 },
 ]
 
 const TOTAL_WEIGHT = STAGE_DEFS.reduce((s, d) => s + d.weight, 0)
@@ -42,9 +44,13 @@ function stageProgress(
       if (frame != null && total_frames && total_frames > 0) {
         return Math.min(100, Math.round((frame / total_frames) * 100))
       }
-      return Math.min(100, Math.max(0, Math.round(((pct - 20) / 63) * 100)))
+      return Math.min(100, Math.max(0, Math.round(((pct - 20) / 60) * 100)))
+    case 'blade_tracking':
+      return Math.min(100, Math.max(0, Math.round(((pct - 80) / 8) * 100)))
+    case 'action_classification':
+      return Math.min(100, Math.max(0, Math.round(((pct - 88) / 7) * 100)))
     case 'llm_synthesis':
-      return Math.min(100, Math.max(0, Math.round(((pct - 85) / 15) * 100)))
+      return Math.min(100, Math.max(0, Math.round(((pct - 95) / 20) * 100)))
     default:
       return 0
   }

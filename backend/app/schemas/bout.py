@@ -2,6 +2,15 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class BladeStateRead(BaseModel):
+    model_config = {"from_attributes": True}
+
+    tip_xyz: dict
+    nominal_xyz: dict | None
+    velocity_xyz: dict
+    speed: float | None
+
+
 class FrameRead(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -9,6 +18,7 @@ class FrameRead(BaseModel):
     timestamp_ms: int
     fencer_pose: dict
     opponent_pose: dict | None
+    blade_state: BladeStateRead | None = None
 
 
 class BoutRead(BaseModel):
@@ -27,5 +37,5 @@ class BoutRead(BaseModel):
 
 class BoutUploadResponse(BaseModel):
     bout_id: int
-    task_id: str
+    task_id: str | None
     status: str

@@ -1,5 +1,6 @@
 import os
 import uuid
+import subprocess
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session as DBSession
 
@@ -55,23 +56,24 @@ async def upload_video(
     with open(dest_path, "wb") as f:
         f.write(contents)
 
-    # Create bout record
+    # Extract thumbnail from first frame
+    video_key_no_ext = os.path.splitext(video_key)[0]
+    thumb_path = f"/app/uploads/thumb_{video_key_no_ext}.jpg"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-i", dest_path,
+        "-vf", "select=eq(n\\,0)", "-vframes", "1",
+        "-q:v", "3", thumb_path, "-y"
+    ], check=True)
+
+    # Create bout record in "configuring" state — pipeline not dispatched yet
     bout = Bout(
         session_id=db_session.id,
         video_key=video_key,
         video_url=f"/uploads/{video_key}",
-        status="queued",
+        status="configuring",
     )
     db.add(bout)
     db.commit()
     db.refresh(bout)
 
-    # Dispatch Celery task
-    from app.tasks import dispatch_pipeline
-    task = dispatch_pipeline(bout.id, dest_path)
-
-    bout.task_id = task.id
-    bout.status = "queued"
-    db.commit()
-
-    return BoutUploadResponse(bout_id=bout.id, task_id=task.id, status="queued")
+    return BoutUploadResponse(bout_id=bout.id, task_id=None, status="configuring")

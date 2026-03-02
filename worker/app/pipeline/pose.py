@@ -19,7 +19,64 @@ def _get_model():
     return _model
 
 
-def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None):
+def _bbox_iou_center(det_box, roi_box):
+    """Check if detection center falls within ROI bounding box.
+    det_box: [x1, y1, x2, y2] in normalized coords (from YOLO)
+    roi_box: dict {x1, y1, x2, y2} in normalized coords (from user)
+    Returns True if detection center is inside ROI.
+    """
+    cx = (det_box[0] + det_box[2]) / 2
+    cy = (det_box[1] + det_box[3]) / 2
+    return (roi_box['x1'] <= cx <= roi_box['x2'] and
+            roi_box['y1'] <= cy <= roi_box['y2'])
+
+
+def _assign_detections(result, fencer_bbox, opponent_bbox):
+    """Assign YOLO detections to fencer/opponent roles using ROI boxes.
+    Falls back to kps[0]=fencer, kps[1]=opponent if no ROI specified.
+    Returns (fencer_kps, fencer_conf, opponent_kps, opponent_conf) or Nones.
+    """
+    if result.keypoints is None or len(result.keypoints) == 0:
+        return None, None, None, None
+
+    kps_all = result.keypoints.xyn.cpu().numpy()
+    conf_all = (result.keypoints.conf.cpu().numpy()
+                if result.keypoints.conf is not None else None)
+
+    # If no ROI specified, use index order (existing behavior)
+    if fencer_bbox is None and opponent_bbox is None:
+        fencer_kps = kps_all[0] if len(kps_all) >= 1 else None
+        fencer_conf = conf_all[0] if conf_all is not None and len(conf_all) >= 1 else None
+        opp_kps = kps_all[1] if len(kps_all) >= 2 else None
+        opp_conf = conf_all[1] if conf_all is not None and len(conf_all) >= 2 else None
+        return fencer_kps, fencer_conf, opp_kps, opp_conf
+
+    # Get normalized bounding boxes for each detection
+    fencer_kps = fencer_conf = opp_kps = opp_conf = None
+
+    if result.boxes is not None and len(result.boxes) > 0:
+        boxes_norm = result.boxes.xyxyn.cpu().numpy()  # normalized [x1,y1,x2,y2]
+
+        for i, det_box in enumerate(boxes_norm):
+            if i >= len(kps_all):
+                break
+            kps = kps_all[i]
+            conf = conf_all[i] if conf_all is not None else None
+
+            if fencer_bbox is not None and fencer_kps is None:
+                if _bbox_iou_center(det_box, fencer_bbox):
+                    fencer_kps, fencer_conf = kps, conf
+
+            if opponent_bbox is not None and opp_kps is None:
+                if _bbox_iou_center(det_box, opponent_bbox):
+                    opp_kps, opp_conf = kps, conf
+
+    # Fallback: if ROI specified but no match found, return nothing for that role
+    return fencer_kps, fencer_conf, opp_kps, opp_conf
+
+
+def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None,
+                        fencer_bbox=None, opponent_bbox=None):
     """
     Run YOLOv8-Pose on every frame of the video.
     Persists Frame records to the database and returns a summary list.
@@ -74,14 +131,13 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
             fencer_pose = {}
             opponent_pose = {}
 
-            if result.keypoints is not None and len(result.keypoints) > 0:
-                kps = result.keypoints.xyn.cpu().numpy()  # normalized [0,1]
-                conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
-
-                if len(kps) >= 1:
-                    fencer_pose = _keypoints_to_dict(kps[0], conf[0] if conf is not None else None)
-                if len(kps) >= 2:
-                    opponent_pose = _keypoints_to_dict(kps[1], conf[1] if conf is not None else None)
+            fencer_kps, fencer_conf, opp_kps, opp_conf = _assign_detections(
+                result, fencer_bbox, opponent_bbox
+            )
+            if fencer_kps is not None:
+                fencer_pose = _keypoints_to_dict(fencer_kps, fencer_conf)
+            if opp_kps is not None:
+                opponent_pose = _keypoints_to_dict(opp_kps, opp_conf)
 
             db_frame = Frame(
                 bout_id=bout_id,
