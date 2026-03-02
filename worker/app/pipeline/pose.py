@@ -1,6 +1,9 @@
 """Stage 2 — Per-frame pose estimation using YOLOv8-Pose (CUDA)."""
 import logging
+import subprocess
 from typing import Any
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -30,39 +33,77 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     duration = video_info.get("duration", 0)
     total_frames_hint = int(fps * duration) if duration else 0
 
-    for result in model.track(video_path, stream=True, device="cuda"):
-        timestamp_ms = int((frame_idx / fps) * 1000)
+    width  = video_info.get("width",  1920)
+    height = video_info.get("height", 1080)
+    codec  = video_info.get("codec",  "")
 
-        fencer_pose = {}
-        opponent_pose = {}
+    # Map codec name to NVDEC decoder
+    _NVDEC = {
+        "hevc": "hevc_cuvid",
+        "h264": "h264_cuvid",
+        "vp9":  "vp9_cuvid",
+        "av1":  "av1_cuvid",
+    }
+    nvdec_decoder = _NVDEC.get(codec)
 
-        if result.keypoints is not None and len(result.keypoints) > 0:
-            kps = result.keypoints.xyn.cpu().numpy()  # normalized [0,1]
-            conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
+    ffmpeg_cmd = ["ffmpeg", "-v", "error"]
+    if nvdec_decoder:
+        ffmpeg_cmd += ["-hwaccel", "cuda", "-c:v", nvdec_decoder]
+    ffmpeg_cmd += [
+        "-i", video_path,
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
 
-            if len(kps) >= 1:
-                fencer_pose = _keypoints_to_dict(kps[0], conf[0] if conf is not None else None)
-            if len(kps) >= 2:
-                opponent_pose = _keypoints_to_dict(kps[1], conf[1] if conf is not None else None)
+    frame_bytes = width * height * 3
+    proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 4)
 
-        frame = Frame(
-            bout_id=bout_id,
-            timestamp_ms=timestamp_ms,
-            fencer_pose=fencer_pose,
-            opponent_pose=opponent_pose if opponent_pose else None,
-        )
-        db.add(frame)
+    try:
+        while True:
+            raw = proc.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
 
-        results_summary.append({"frame": frame_idx, "timestamp_ms": timestamp_ms})
-        frame_idx += 1
+            results = model.track(frame, persist=True, device="cuda", verbose=False)
+            result = results[0]
 
-        if progress_callback and frame_idx % 100 == 0:
-            progress_callback(frame_idx, total_frames_hint)
+            timestamp_ms = int((frame_idx / fps) * 1000)
 
-        # Commit in batches to avoid huge transactions
-        if frame_idx % 300 == 0:
-            db.commit()
-            logger.debug("Committed %d frames", frame_idx)
+            fencer_pose = {}
+            opponent_pose = {}
+
+            if result.keypoints is not None and len(result.keypoints) > 0:
+                kps = result.keypoints.xyn.cpu().numpy()  # normalized [0,1]
+                conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
+
+                if len(kps) >= 1:
+                    fencer_pose = _keypoints_to_dict(kps[0], conf[0] if conf is not None else None)
+                if len(kps) >= 2:
+                    opponent_pose = _keypoints_to_dict(kps[1], conf[1] if conf is not None else None)
+
+            db_frame = Frame(
+                bout_id=bout_id,
+                timestamp_ms=timestamp_ms,
+                fencer_pose=fencer_pose,
+                opponent_pose=opponent_pose if opponent_pose else None,
+            )
+            db.add(db_frame)
+
+            results_summary.append({"frame": frame_idx, "timestamp_ms": timestamp_ms})
+            frame_idx += 1
+
+            if progress_callback and frame_idx % 100 == 0:
+                progress_callback(frame_idx, total_frames_hint)
+
+            # Commit in batches to avoid huge transactions
+            if frame_idx % 300 == 0:
+                db.commit()
+                logger.debug("Committed %d frames", frame_idx)
+    finally:
+        proc.stdout.close()
+        proc.wait()
 
     db.commit()
     logger.info("Pose estimation complete: %d frames persisted", frame_idx)

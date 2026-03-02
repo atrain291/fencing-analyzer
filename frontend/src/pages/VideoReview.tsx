@@ -22,6 +22,8 @@ const SKELETON_EDGES: [string, string][] = [
 
 const CONFIDENCE_THRESHOLD = 0.3
 
+const SPEEDS = [0.25, 0.5, 1, 2]
+
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
   pose: Record<string, Keypoint>,
@@ -119,8 +121,14 @@ export default function VideoReview() {
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null)
   const [videoUrl, setVideoUrl] = useState('')
   const [frames, setFrames] = useState<Frame[]>([])
+  const [speed, setSpeed] = useState(1)
   const framesRef = useRef<Frame[]>([])
   const rafRef = useRef<number | null>(null)
+
+  function handleSpeed(s: number) {
+    setSpeed(s)
+    if (videoRef.current) videoRef.current.playbackRate = s
+  }
 
   useEffect(() => {
     framesRef.current = frames
@@ -247,6 +255,23 @@ export default function VideoReview() {
               ref={canvasRef}
               className="absolute inset-0 w-full h-full pointer-events-none"
             />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Speed</span>
+            {SPEEDS.map(s => (
+              <button
+                key={s}
+                onClick={() => handleSpeed(s)}
+                className={[
+                  'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                  speed === s
+                    ? 'bg-brand-500 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                ].join(' ')}
+              >
+                {s}×
+              </button>
+            ))}
           </div>
           <p className="text-xs text-gray-500">
             {frames.length > 0
