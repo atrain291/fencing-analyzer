@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { getBout, deleteBout, Frame, Keypoint } from '@/api/bouts'
-import { Trash2 } from 'lucide-react'
+import { Trash2, Maximize2, Minimize2 } from 'lucide-react'
 
 interface AnalysisSummary {
   llm_summary: string
@@ -118,16 +118,26 @@ export default function VideoReview() {
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null)
   const [videoUrl, setVideoUrl] = useState('')
   const [frames, setFrames] = useState<Frame[]>([])
   const [speed, setSpeed] = useState(1)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const framesRef = useRef<Frame[]>([])
   const rafRef = useRef<number | null>(null)
 
   function handleSpeed(s: number) {
     setSpeed(s)
     if (videoRef.current) videoRef.current.playbackRate = s
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      containerRef.current?.requestFullscreen()
+    } else {
+      document.exitFullscreen()
+    }
   }
 
   useEffect(() => {
@@ -142,6 +152,12 @@ export default function VideoReview() {
       if (data.frames) setFrames(data.frames)
     })
   }, [boutId])
+
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFsChange)
+    return () => document.removeEventListener('fullscreenchange', onFsChange)
+  }, [])
 
   const renderSkeleton = useCallback(() => {
     const video = videoRef.current
@@ -185,6 +201,14 @@ export default function VideoReview() {
   }, [])
 
   useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const ro = new ResizeObserver(() => renderSkeleton())
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [renderSkeleton])
+
+  useEffect(() => {
     const video = videoRef.current
     if (!video) return
 
@@ -226,7 +250,7 @@ export default function VideoReview() {
   }, [renderSkeleton])
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-screen-2xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">Bout Review — #{boutId}</h1>
         <button
@@ -241,10 +265,20 @@ export default function VideoReview() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Video + skeleton canvas */}
-        <div className="lg:col-span-2 space-y-3">
-          <div className="relative bg-black rounded-xl overflow-hidden aspect-video">
+        <div className="lg:col-span-3 space-y-3">
+          <div
+            ref={containerRef}
+            className={`relative bg-black rounded-xl overflow-hidden aspect-video ${isFullscreen ? 'rounded-none' : ''}`}
+          >
+            <button
+              onClick={toggleFullscreen}
+              className="absolute top-2 right-2 z-10 p-1.5 bg-black/50 hover:bg-black/70 rounded-md text-white transition-colors"
+              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen with overlay'}
+            >
+              {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
             <video
               ref={videoRef}
               src={videoUrl}
@@ -281,7 +315,7 @@ export default function VideoReview() {
         </div>
 
         {/* Analysis panel */}
-        <div className="space-y-4">
+        <div className="lg:col-span-1 space-y-4">
           <div className="bg-gray-900 rounded-xl p-4">
             <h2 className="font-semibold mb-3 text-sm text-gray-400 uppercase tracking-wider">
               AI Coaching Feedback
