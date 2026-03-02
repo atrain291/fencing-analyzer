@@ -2,7 +2,25 @@
   "permissions": {
     "allow": [
       "Bash(podman-compose up:*)",
-      "Bash(podman image ls:*)"
+      "Bash(podman image ls:*)",
+      "Bash(sysctl:*)",
+      "Bash(podman build:*)",
+      "Bash(podman-compose config:*)",
+      "Bash(podman-compose:*)",
+      "Bash(podman ps:*)",
+      "Bash(podman logs:*)",
+      "Bash(podman exec:*)",
+      "Bash(curl:*)",
+      "Bash(podman restart:*)",
+      "Bash(git add:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(podman run:*)",
+      "Bash(podman inspect:*)"
     ]
   }
 }
