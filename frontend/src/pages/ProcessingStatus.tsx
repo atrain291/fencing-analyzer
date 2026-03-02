@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { getBoutStatus, deleteBout, type BoutStatus } from '@/api/bouts'
 import { CheckCircle, Loader2, Circle, XCircle } from 'lucide-react'
@@ -63,6 +63,13 @@ function stageStatus(
   return 'pending'
 }
 
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `~${Math.round(seconds)}s remaining`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  return s > 0 ? `~${m}m ${s}s remaining` : `~${m}m remaining`
+}
+
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ interface StageRowProps {
   total_frames?: number
   gpu_mem_pct?: number
   cpu_pct?: number
+  eta?: number | null
 }
 
 function StageRow({
@@ -102,6 +110,7 @@ function StageRow({
   total_frames,
   gpu_mem_pct,
   cpu_pct,
+  eta,
 }: StageRowProps) {
   const isComplete = status === 'complete'
   const isActive   = status === 'active'
@@ -167,6 +176,11 @@ function StageRow({
         </p>
       )}
 
+      {/* ETA (pose_estimation only, when active and eta is available) */}
+      {isActive && eta != null && def.key === 'pose_estimation' && (
+        <p className="text-xs text-brand-400 pl-8">{formatEta(eta)}</p>
+      )}
+
       {/* Resource bars (active only, when data present) */}
       {isActive && (gpu_mem_pct != null || cpu_pct != null) && (
         <div className="pl-8 flex flex-col gap-1">
@@ -184,9 +198,10 @@ function StageRow({
 
 interface PipelineProps {
   pipeline: BoutStatus['pipeline_progress']
+  eta?: number | null
 }
 
-function PipelineVisualization({ pipeline }: PipelineProps) {
+function PipelineVisualization({ pipeline, eta }: PipelineProps) {
   const currentStage   = pipeline.stage ?? ''
   const pct            = pipeline.pct ?? 0
   const frame          = pipeline.frame
@@ -214,6 +229,7 @@ function PipelineVisualization({ pipeline }: PipelineProps) {
             total_frames={ss === 'active' ? total_frames : undefined}
             gpu_mem_pct={ss === 'active' ? gpu_mem_pct : undefined}
             cpu_pct={ss === 'active' ? cpu_pct : undefined}
+            eta={ss === 'active' ? eta : undefined}
           />
         )
       })}
@@ -229,6 +245,9 @@ export default function ProcessingStatus() {
   const { boutId } = useParams<{ boutId: string }>()
   const navigate = useNavigate()
   const [status, setStatus] = useState<BoutStatus | null>(null)
+  const [eta, setEta] = useState<number | null>(null)
+  const prevFrameRef = useRef<{ frame: number; time: number } | null>(null)
+  const etaRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (!boutId) return
@@ -238,6 +257,23 @@ export default function ProcessingStatus() {
       try {
         const s = await getBoutStatus(id)
         setStatus(s)
+
+        if (s.pipeline_progress.frame != null && s.pipeline_progress.frame > 0) {
+          const now = Date.now()
+          const frame = s.pipeline_progress.frame!
+          const total = s.pipeline_progress.total_frames!
+
+          if (prevFrameRef.current && frame > prevFrameRef.current.frame) {
+            const elapsed = (now - prevFrameRef.current.time) / 1000
+            const framesDone = frame - prevFrameRef.current.frame
+            const fps = framesDone / elapsed
+            const remaining = (total - frame) / fps
+            etaRef.current = remaining
+          }
+          prevFrameRef.current = { frame, time: now }
+          setEta(etaRef.current)
+        }
+
         if (s.status === 'complete') {
           setTimeout(() => navigate(`/bouts/${boutId}/review`), 1500)
         }
@@ -270,7 +306,7 @@ export default function ProcessingStatus() {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider px-1 mb-3">
               Pipeline
             </p>
-            <PipelineVisualization pipeline={status?.pipeline_progress ?? {}} />
+            <PipelineVisualization pipeline={status?.pipeline_progress ?? {}} eta={eta} />
           </div>
 
           <div className="text-center">
