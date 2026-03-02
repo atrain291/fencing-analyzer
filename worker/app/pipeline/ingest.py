@@ -13,8 +13,6 @@ def ingest_video(video_path: str) -> dict:
         "-v", "quiet",
         "-print_format", "json",
         "-show_streams",
-        "-count_packets",
-        "-show_entries", "stream=nb_read_packets",
         "-select_streams", "v:0",
         video_path,
     ]
@@ -25,8 +23,8 @@ def ingest_video(video_path: str) -> dict:
     fps_parts = stream.get("r_frame_rate", "30/1").split("/")
     fps = float(fps_parts[0]) / float(fps_parts[1])
 
-    nb_packets = stream.get("nb_read_packets")
-    total_frames = int(nb_packets) if nb_packets else int(fps * float(stream.get("duration", 0)))
+    nb_frames = stream.get("nb_frames")
+    total_frames = int(nb_frames) if nb_frames else int(fps * float(stream.get("duration", 0)))
 
     info = {
         "width": stream.get("width"),
