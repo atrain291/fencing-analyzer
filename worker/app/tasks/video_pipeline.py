@@ -85,7 +85,8 @@ def run_pipeline(self, bout_id: int, video_path: str):
             logger.info("Ingest complete: %s", video_info)
 
             # Stage 2 — Pose estimation
-            _update_progress(bout_id, "pose_estimation", 20, db)
+            _update_progress(bout_id, "pose_estimation", 20, db,
+                             extra={"frame": 0, "total_frames": video_info.get("total_frames", 0)})
 
             def pose_progress(frame_idx: int, total_frames: int):
                 if total_frames > 0:
