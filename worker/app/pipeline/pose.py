@@ -174,6 +174,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
         "-i", video_path,
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
         "pipe:1",
     ]
 
@@ -213,7 +214,8 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
 
-            results = model.track(frame, persist=True, device="cuda", verbose=False,
+            persist = frame_idx > 0  # False on first frame resets stale tracker/GMC state
+            results = model.track(frame, persist=persist, device="cuda", verbose=False,
                                   tracker=_TRACKER_CFG)
             result = results[0]
 
