@@ -98,6 +98,14 @@ def preview_skeletons(self, bout_id: int, video_path: str):
 
             # Stage 3: Run YOLO predict on each frame
             model = _get_model()
+            # Clear stale tracker callbacks left by prior .track() calls
+            # (ultralytics attaches on_predict_postprocess_end which invokes
+            #  BoT-SORT GMC even during .predict(), causing lkpyramid errors
+            #  when frame resolution changes between bouts)
+            if hasattr(model, "predictor") and model.predictor is not None:
+                cb = model.predictor.callbacks.get("on_predict_postprocess_end")
+                if cb:
+                    cb.clear()
             os.makedirs(PREVIEW_DIR, exist_ok=True)
 
             preview_frames = []
