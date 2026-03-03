@@ -61,6 +61,16 @@ class BoutRead(BaseModel):
     analysis: AnalysisRead | None = None
 
 
+class BoutSummary(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    status: str
+    created_at: datetime
+    video_url: str | None
+    duration_ms: int | None
+
+
 class BoutUploadResponse(BaseModel):
     bout_id: int
     task_id: str | None

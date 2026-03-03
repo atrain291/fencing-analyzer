@@ -38,7 +38,7 @@ STAGES = [
     "pose_estimation",
     "blade_tracking",
     "action_classification",
-    "llm_synthesis",
+    # "llm_synthesis",  # disabled — re-enable when LLM coaching is needed
 ]
 
 
@@ -134,25 +134,28 @@ def run_pipeline(self, bout_id: int, video_path: str):
             action_results = run_action_classification(bout_id, frames, db)
             logger.info("Action classification complete: %d actions", len(action_results))
 
-            # Stage 5 — LLM synthesis (90%)
-            _update_progress(bout_id, "llm_synthesis", 90, db)
-
-            # Collect blade state data for LLM prompt enrichment
-            from app.models.analysis import BladeState
-            blade_rows = (db.query(BladeState)
-                          .join(Frame, BladeState.frame_id == Frame.id)
-                          .filter(Frame.bout_id == bout_id)
-                          .order_by(Frame.timestamp_ms)
-                          .all())
-            blade_states = [
-                {"speed": bs.speed, "tip_xyz": bs.tip_xyz, "velocity_xyz": bs.velocity_xyz}
-                for bs in blade_rows
-            ]
-            logger.info("Loaded %d blade states for LLM synthesis", len(blade_states))
-
-            coaching_text = synthesize_coaching_feedback(
-                bout_id, pose_results, action_results, blade_states, db
-            )
+            # Stage 5 — LLM synthesis (DISABLED — skip to complete)
+            # To re-enable, uncomment the block below and remove the stub.
+            logger.info("LLM synthesis stage disabled — skipping for bout %d", bout_id)
+            coaching_text = "LLM coaching disabled. Re-enable llm_synthesis stage in video_pipeline.py."
+            # _update_progress(bout_id, "llm_synthesis", 90, db)
+            #
+            # # Collect blade state data for LLM prompt enrichment
+            # from app.models.analysis import BladeState
+            # blade_rows = (db.query(BladeState)
+            #               .join(Frame, BladeState.frame_id == Frame.id)
+            #               .filter(Frame.bout_id == bout_id)
+            #               .order_by(Frame.timestamp_ms)
+            #               .all())
+            # blade_states = [
+            #     {"speed": bs.speed, "tip_xyz": bs.tip_xyz, "velocity_xyz": bs.velocity_xyz}
+            #     for bs in blade_rows
+            # ]
+            # logger.info("Loaded %d blade states for LLM synthesis", len(blade_states))
+            #
+            # coaching_text = synthesize_coaching_feedback(
+            #     bout_id, pose_results, action_results, blade_states, db
+            # )
 
             # Persist analysis
             from app.models import Analysis

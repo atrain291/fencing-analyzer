@@ -1,9 +1,50 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, User, AlertCircle } from 'lucide-react'
+import { Upload, User, AlertCircle, FileVideo, Clock } from 'lucide-react'
 import { listFencers, createFencer, type Fencer } from '@/api/fencers'
-import { uploadVideo, deleteBout } from '@/api/bouts'
+import { uploadVideo, deleteBout, listBouts, getThumbnailUrl, type BoutSummary } from '@/api/bouts'
 import clsx from 'clsx'
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}:${sec.toString().padStart(2, '0')}`
+}
+
+function BoutThumbnail({ boutId }: { boutId: number }) {
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return (
+      <div className="w-[120px] h-[68px] rounded bg-gray-700 flex-shrink-0 flex items-center justify-center">
+        <FileVideo size={24} className="text-gray-500" />
+      </div>
+    )
+  }
+  return (
+    <img
+      src={getThumbnailUrl(boutId)}
+      alt="Bout thumbnail"
+      className="w-[120px] h-[68px] rounded object-cover bg-gray-700 flex-shrink-0"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const label = status.charAt(0).toUpperCase() + status.slice(1).replace('_', ' ')
+  const color =
+    status === 'complete' || status === 'done'
+      ? 'bg-green-500/20 text-green-400'
+      : status === 'processing' || status === 'queued' || status === 'previewing'
+        ? 'bg-yellow-500/20 text-yellow-400'
+        : status === 'configuring' || status === 'preview_ready'
+          ? 'bg-blue-500/20 text-blue-400'
+          : status === 'failed'
+            ? 'bg-red-500/20 text-red-400'
+            : 'bg-gray-500/20 text-gray-400'
+  return <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', color)}>{label}</span>
+}
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -13,12 +54,21 @@ export default function Dashboard() {
   const [uploadPct, setUploadPct] = useState<number | null>(null)
   const [error, setError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const [bouts, setBouts] = useState<BoutSummary[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const boutIdRef = useRef<number | null>(null)
 
   useEffect(() => {
     listFencers().then(setFencers).catch(() => setError('Could not load fencers'))
   }, [])
+
+  useEffect(() => {
+    if (selectedFencer) {
+      listBouts(selectedFencer).then(setBouts).catch(() => {})
+    } else {
+      setBouts([])
+    }
+  }, [selectedFencer])
 
   async function handleCreateFencer() {
     if (!newFencerName.trim()) return
@@ -106,6 +156,61 @@ export default function Dashboard() {
           )}
         </div>
       </section>
+
+      {/* Bout list */}
+      {selectedFencer && (
+        <section className="bg-gray-900 rounded-xl p-5 space-y-4">
+          <h2 className="font-semibold flex items-center gap-2">
+            <FileVideo size={16} /> Your Bouts
+          </h2>
+          {bouts.length === 0 ? (
+            <p className="text-gray-500 text-sm">No bouts yet. Upload a video to get started.</p>
+          ) : (
+            <div className="space-y-2">
+              {bouts.map(bout => (
+                <button
+                  key={bout.id}
+                  onClick={() => {
+                    const s = bout.status
+                    if (s === 'complete' || s === 'done') {
+                      navigate(`/bouts/${bout.id}/review`)
+                    } else if (s === 'configuring' || s === 'preview_ready' || s === 'failed') {
+                      navigate(`/bouts/${bout.id}/configure`)
+                    } else {
+                      navigate(`/bouts/${bout.id}/processing`)
+                    }
+                  }}
+                  className="w-full flex items-center gap-4 bg-gray-800 hover:bg-gray-750 rounded-lg p-3 text-left cursor-pointer transition-colors"
+                >
+                  <BoutThumbnail boutId={bout.id} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm text-gray-300">
+                        {new Date(bout.created_at).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                        })}
+                      </span>
+                      <StatusBadge status={bout.status} />
+                    </div>
+                    <div className="text-xs text-gray-500 flex items-center gap-1">
+                      {bout.duration_ms ? (
+                        <>
+                          <Clock size={12} />
+                          {formatDuration(bout.duration_ms)}
+                        </>
+                      ) : (
+                        '\u2014'
+                      )}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Upload */}
       <section className="bg-gray-900 rounded-xl p-5 space-y-4">

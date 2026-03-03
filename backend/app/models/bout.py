@@ -39,6 +39,7 @@ class Bout(Base):
     pipeline_progress: Mapped[dict] = mapped_column(JSON, default=dict)
     fencer_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     opponent_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    preview_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

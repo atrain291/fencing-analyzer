@@ -76,4 +76,11 @@ async def upload_video(
     db.commit()
     db.refresh(bout)
 
-    return BoutUploadResponse(bout_id=bout.id, task_id=None, status="configuring")
+    # Auto-trigger skeleton preview
+    from app.tasks import dispatch_preview
+    task = dispatch_preview(bout.id, f"/app/uploads/{video_key}")
+    bout.task_id = task.id
+    bout.status = "previewing"
+    db.commit()
+
+    return BoutUploadResponse(bout_id=bout.id, task_id=task.id, status="previewing")

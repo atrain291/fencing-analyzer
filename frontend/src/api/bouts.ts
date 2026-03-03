@@ -117,6 +117,41 @@ export interface Bbox {
   y2: number
 }
 
+export interface DetectionSelection {
+  frame_index: number
+  detection_index: number
+}
+
+export interface PreviewDetection {
+  index: number
+  bbox: Bbox
+  confidence: number
+  keypoints: Record<string, Keypoint>
+}
+
+export interface PreviewFrame {
+  frame_index: number
+  timestamp_ms: number
+  image_key: string
+  detections: PreviewDetection[]
+}
+
+export interface PreviewResponse {
+  status: 'processing' | 'ready' | 'failed'
+  preview_data?: {
+    frames: PreviewFrame[]
+  }
+  error?: string
+}
+
+export interface BoutSummary {
+  id: number
+  status: string
+  created_at: string
+  video_url: string | null
+  duration_ms: number | null
+}
+
 export function getThumbnailUrl(boutId: number): string {
   return `${api.defaults.baseURL}/bouts/${boutId}/thumbnail`
 }
@@ -147,10 +182,29 @@ export async function configureROI(
   boutId: number,
   fencerBbox: Bbox | null,
   opponentBbox: Bbox | null,
+  fencerDetection?: DetectionSelection | null,
+  opponentDetection?: DetectionSelection | null,
 ): Promise<{ status: string; task_id: string }> {
   const { data } = await api.post(`/bouts/${boutId}/roi`, {
     fencer_bbox: fencerBbox,
     opponent_bbox: opponentBbox,
+    fencer_detection: fencerDetection ?? undefined,
+    opponent_detection: opponentDetection ?? undefined,
   })
+  return data
+}
+
+export async function getPreview(boutId: number): Promise<PreviewResponse> {
+  const { data } = await api.get<PreviewResponse>(`/bouts/${boutId}/preview`)
+  return data
+}
+
+export async function triggerPreview(boutId: number): Promise<{ status: string; task_id: string }> {
+  const { data } = await api.post(`/bouts/${boutId}/preview`)
+  return data
+}
+
+export async function listBouts(fencerId: number): Promise<BoutSummary[]> {
+  const { data } = await api.get<BoutSummary[]>('/bouts/', { params: { fencer_id: fencerId } })
   return data
 }

@@ -28,11 +28,11 @@ def _center_in_bbox(cx: float, cy: float, bbox: dict) -> bool:
     return bbox['x1'] <= cx <= bbox['x2'] and bbox['y1'] <= cy <= bbox['y2']
 
 
-def _try_lock_id(result, bbox: dict, exclude_id: int | None) -> int | None:
+def _try_lock_id(result, bbox: dict, exclude_ids: set[int]) -> int | None:
     """
     Try to lock a tracker ID from the current frame using an ROI bbox.
     Returns the tracker ID of the first detection whose center falls in bbox,
-    excluding exclude_id (so fencer and opponent don't get the same ID).
+    excluding any ID in exclude_ids (partner ID + known bystanders).
     Returns None if no match found or tracking IDs unavailable.
     """
     if result.boxes is None or result.boxes.id is None:
@@ -40,7 +40,7 @@ def _try_lock_id(result, bbox: dict, exclude_id: int | None) -> int | None:
     track_ids = result.boxes.id.cpu().numpy().astype(int)
     boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
     for i, tid in enumerate(track_ids):
-        if exclude_id is not None and tid == exclude_id:
+        if int(tid) in exclude_ids:
             continue
         if i >= len(boxes_xyxyn):
             break
@@ -50,6 +50,50 @@ def _try_lock_id(result, bbox: dict, exclude_id: int | None) -> int | None:
         if _center_in_bbox(cx, cy, bbox):
             return int(tid)
     return None
+
+
+def _all_track_ids(result) -> set[int]:
+    """Return the set of all tracker IDs visible in this frame."""
+    if result.boxes is None or result.boxes.id is None:
+        return set()
+    return set(result.boxes.id.cpu().numpy().astype(int).tolist())
+
+
+def _get_center_by_id(result, track_id: int) -> tuple[float, float] | None:
+    """Return normalized center (cx, cy) for the given tracker ID, or None."""
+    if result.boxes is None or result.boxes.id is None:
+        return None
+    track_ids = result.boxes.id.cpu().numpy().astype(int)
+    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
+    for i, tid in enumerate(track_ids):
+        if tid == track_id and i < len(boxes_xyxyn):
+            box = boxes_xyxyn[i]
+            return (float((box[0] + box[2]) / 2), float((box[1] + box[3]) / 2))
+    return None
+
+
+def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int]) -> int | None:
+    """Find the tracker ID whose detection center is closest to (cx, cy),
+    excluding any ID in exclude_ids. Returns None if no candidates."""
+    if result.boxes is None or result.boxes.id is None:
+        return None
+    track_ids = result.boxes.id.cpu().numpy().astype(int)
+    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
+    best_tid = None
+    best_dist = float('inf')
+    for i, tid in enumerate(track_ids):
+        if int(tid) in exclude_ids:
+            continue
+        if i >= len(boxes_xyxyn):
+            break
+        box = boxes_xyxyn[i]
+        dcx = float((box[0] + box[2]) / 2)
+        dcy = float((box[1] + box[3]) / 2)
+        dist = (dcx - cx) ** 2 + (dcy - cy) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best_tid = int(tid)
+    return best_tid
 
 
 def _best_other_id(result, exclude_id: int) -> int | None:
@@ -141,17 +185,26 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     opponent_track_id: int | None = None
     roi_mode = fencer_bbox is not None or opponent_bbox is not None
 
+    # Every tracker ID that is NOT the fencer or opponent.  When re-locking
+    # after occlusion, these IDs are excluded so we don't grab a bystander
+    # who walked through the ROI.
+    known_other_ids: set[int] = set()
+
     # Confirmation-based re-lock: when the locked ID goes missing, we look for
     # a new ID in the ROI.  Only switch if the same new ID appears in the ROI
     # for RELOCK_CONFIRM consecutive frames (filters transient occluders).
     RELOCK_MIN_WAIT = 15       # don't even start looking for a new ID until this many missing frames
-    RELOCK_CONFIRM = 10        # new candidate must be in ROI for this many consecutive frames
+    RELOCK_CONFIRM = 3         # new candidate must be stable for this many consecutive frames
     fencer_missing_count = 0
     fencer_candidate_id: int | None = None
     fencer_candidate_count = 0
+    fencer_last_cx: float | None = None   # last known normalized center
+    fencer_last_cy: float | None = None
     opponent_missing_count = 0
     opponent_candidate_id: int | None = None
     opponent_candidate_count = 0
+    opponent_last_cx: float | None = None
+    opponent_last_cy: float | None = None
 
     try:
         while True:
@@ -168,109 +221,164 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
 
             fencer_pose = {}
             opponent_pose = {}
+            fencer_found = False
+            opponent_found = False
 
             if result.keypoints is not None and len(result.keypoints) > 0:
                 if roi_mode:
+                    # Collect all visible IDs so we can tag bystanders
+                    frame_ids = _all_track_ids(result)
+
+                    # Build exclusion sets for each role
+                    fencer_exclude = known_other_ids.copy()
+                    if opponent_track_id is not None:
+                        fencer_exclude.add(opponent_track_id)
+                    opponent_exclude = known_other_ids.copy()
+                    if fencer_track_id is not None:
+                        opponent_exclude.add(fencer_track_id)
+
                     # --- Fencer tracking ---
                     if fencer_track_id is not None:
                         kps, conf = _get_kps_by_id(result, fencer_track_id)
                         if kps is not None:
-                            # Locked ID still visible — normal path
-                            fencer_pose = _keypoints_to_dict(kps, conf)
+                            fencer_pose = keypoints_to_dict(kps, conf)
+                            fencer_found = True
                             fencer_missing_count = 0
                             fencer_candidate_id = None
                             fencer_candidate_count = 0
+                            # Track last known position for proximity re-lock
+                            center = _get_center_by_id(result, fencer_track_id)
+                            if center:
+                                fencer_last_cx, fencer_last_cy = center
                         else:
-                            # Locked ID missing (occluded or tracker dropped it)
                             fencer_missing_count += 1
-                            # After a grace period, look for a new ID in the ROI
-                            if fencer_missing_count >= RELOCK_MIN_WAIT and fencer_bbox is not None:
-                                roi_id = _try_lock_id(result, fencer_bbox, opponent_track_id)
-                                if roi_id is not None:
-                                    # Require the same new ID for RELOCK_CONFIRM frames
-                                    if roi_id == fencer_candidate_id:
+                            if fencer_missing_count >= RELOCK_MIN_WAIT:
+                                # Proximity to last known position
+                                new_id = None
+                                if fencer_last_cx is not None:
+                                    new_id = _closest_id_excluding(
+                                        result, fencer_last_cx, fencer_last_cy, fencer_exclude)
+                                if new_id is not None:
+                                    if new_id == fencer_candidate_id:
                                         fencer_candidate_count += 1
                                     else:
-                                        fencer_candidate_id = roi_id
+                                        fencer_candidate_id = new_id
                                         fencer_candidate_count = 1
                                     if fencer_candidate_count >= RELOCK_CONFIRM:
                                         logger.info(
                                             "Frame %d: re-locked fencer ID %d -> %d "
-                                            "(confirmed %d frames in ROI after %d missing)",
-                                            frame_idx, fencer_track_id, roi_id,
-                                            RELOCK_CONFIRM, fencer_missing_count)
-                                        fencer_track_id = roi_id
+                                            "(after %d missing frames)",
+                                            frame_idx, fencer_track_id, new_id,
+                                            fencer_missing_count)
+                                        fencer_track_id = new_id
                                         fencer_missing_count = 0
                                         fencer_candidate_id = None
                                         fencer_candidate_count = 0
                                         kps, conf = _get_kps_by_id(result, fencer_track_id)
                                         if kps is not None:
-                                            fencer_pose = _keypoints_to_dict(kps, conf)
+                                            fencer_pose = keypoints_to_dict(kps, conf)
+                                            fencer_found = True
+                                            center = _get_center_by_id(result, fencer_track_id)
+                                            if center:
+                                                fencer_last_cx, fencer_last_cy = center
                                 else:
-                                    # Nobody in ROI — occluder still blocking, keep waiting
                                     fencer_candidate_id = None
                                     fencer_candidate_count = 0
                     elif fencer_bbox is not None:
-                        # Initial lock (first frames of video)
-                        fencer_track_id = _try_lock_id(result, fencer_bbox, opponent_track_id)
+                        fencer_track_id = _try_lock_id(result, fencer_bbox, fencer_exclude)
                         if fencer_track_id is not None:
                             logger.info("Frame %d: locked fencer tracker ID %d",
                                         frame_idx, fencer_track_id)
+                            fencer_found = True
                             kps, conf = _get_kps_by_id(result, fencer_track_id)
                             if kps is not None:
-                                fencer_pose = _keypoints_to_dict(kps, conf)
+                                fencer_pose = keypoints_to_dict(kps, conf)
+                            center = _get_center_by_id(result, fencer_track_id)
+                            if center:
+                                fencer_last_cx, fencer_last_cy = center
 
                     # --- Opponent tracking ---
                     if opponent_track_id is not None:
                         kps, conf = _get_kps_by_id(result, opponent_track_id)
                         if kps is not None:
-                            opponent_pose = _keypoints_to_dict(kps, conf)
+                            opponent_pose = keypoints_to_dict(kps, conf)
+                            opponent_found = True
                             opponent_missing_count = 0
                             opponent_candidate_id = None
                             opponent_candidate_count = 0
+                            center = _get_center_by_id(result, opponent_track_id)
+                            if center:
+                                opponent_last_cx, opponent_last_cy = center
                         else:
                             opponent_missing_count += 1
-                            if opponent_missing_count >= RELOCK_MIN_WAIT and opponent_bbox is not None:
-                                roi_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
-                                if roi_id is not None:
-                                    if roi_id == opponent_candidate_id:
+                            if opponent_missing_count >= RELOCK_MIN_WAIT:
+                                # Proximity to last known position
+                                new_id = None
+                                if opponent_last_cx is not None:
+                                    new_id = _closest_id_excluding(
+                                        result, opponent_last_cx, opponent_last_cy, opponent_exclude)
+                                if new_id is not None:
+                                    if new_id == opponent_candidate_id:
                                         opponent_candidate_count += 1
                                     else:
-                                        opponent_candidate_id = roi_id
+                                        opponent_candidate_id = new_id
                                         opponent_candidate_count = 1
                                     if opponent_candidate_count >= RELOCK_CONFIRM:
                                         logger.info(
                                             "Frame %d: re-locked opponent ID %d -> %d "
-                                            "(confirmed %d frames in ROI after %d missing)",
-                                            frame_idx, opponent_track_id, roi_id,
-                                            RELOCK_CONFIRM, opponent_missing_count)
-                                        opponent_track_id = roi_id
+                                            "(after %d missing frames)",
+                                            frame_idx, opponent_track_id, new_id,
+                                            opponent_missing_count)
+                                        opponent_track_id = new_id
                                         opponent_missing_count = 0
                                         opponent_candidate_id = None
                                         opponent_candidate_count = 0
                                         kps, conf = _get_kps_by_id(result, opponent_track_id)
                                         if kps is not None:
-                                            opponent_pose = _keypoints_to_dict(kps, conf)
+                                            opponent_pose = keypoints_to_dict(kps, conf)
+                                            opponent_found = True
+                                            center = _get_center_by_id(result, opponent_track_id)
+                                            if center:
+                                                opponent_last_cx, opponent_last_cy = center
                                 else:
                                     opponent_candidate_id = None
                                     opponent_candidate_count = 0
                     elif opponent_bbox is not None:
-                        opponent_track_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
+                        opponent_track_id = _try_lock_id(result, opponent_bbox, opponent_exclude)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: locked opponent tracker ID %d",
                                         frame_idx, opponent_track_id)
+                            opponent_found = True
                             kps, conf = _get_kps_by_id(result, opponent_track_id)
                             if kps is not None:
-                                opponent_pose = _keypoints_to_dict(kps, conf)
+                                opponent_pose = keypoints_to_dict(kps, conf)
+                            center = _get_center_by_id(result, opponent_track_id)
+                            if center:
+                                opponent_last_cx, opponent_last_cy = center
                     elif fencer_track_id is not None:
-                        # Auto-assign opponent (no bbox drawn): highest-confidence other
                         opponent_track_id = _best_other_id(result, fencer_track_id)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: auto-assigned opponent tracker ID %d",
                                         frame_idx, opponent_track_id)
+                            opponent_found = True
                             kps, conf = _get_kps_by_id(result, opponent_track_id)
                             if kps is not None:
-                                opponent_pose = _keypoints_to_dict(kps, conf)
+                                opponent_pose = keypoints_to_dict(kps, conf)
+                            center = _get_center_by_id(result, opponent_track_id)
+                            if center:
+                                opponent_last_cx, opponent_last_cy = center
+
+                    # Tag bystanders ONLY when both fencer and opponent are
+                    # positively identified in this frame.  If either is
+                    # missing, a new tracker ID might belong to the missing
+                    # person (tracker ID re-assignment after occlusion).
+                    # Also never tag current re-lock candidates as bystanders.
+                    if fencer_found and opponent_found:
+                        protected = {fencer_track_id, opponent_track_id,
+                                     fencer_candidate_id, opponent_candidate_id}
+                        for tid in frame_ids:
+                            if tid not in protected:
+                                known_other_ids.add(tid)
 
                 else:
                     # No ROI: fall back to index order (kps[0]=fencer, kps[1]=opponent)
@@ -278,10 +386,10 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                     conf_all = (result.keypoints.conf.cpu().numpy()
                                 if result.keypoints.conf is not None else None)
                     if len(kps_all) >= 1:
-                        fencer_pose = _keypoints_to_dict(
+                        fencer_pose = keypoints_to_dict(
                             kps_all[0], conf_all[0] if conf_all is not None else None)
                     if len(kps_all) >= 2:
-                        opponent_pose = _keypoints_to_dict(
+                        opponent_pose = keypoints_to_dict(
                             kps_all[1], conf_all[1] if conf_all is not None else None)
 
             db_frame = Frame(
@@ -320,7 +428,7 @@ KEYPOINT_NAMES = [
 ]
 
 
-def _keypoints_to_dict(kps: Any, conf: Any) -> dict:
+def keypoints_to_dict(kps: Any, conf: Any) -> dict:
     result = {}
     for i, name in enumerate(KEYPOINT_NAMES):
         if i < len(kps):

@@ -16,3 +16,4 @@ class Bout(Base):
     video_key: Mapped[str | None] = mapped_column(String(1024))
     fencer_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     opponent_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    preview_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)

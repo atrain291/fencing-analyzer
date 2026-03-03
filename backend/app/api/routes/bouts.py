@@ -7,9 +7,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models.bout import Bout
+from app.models.bout import Bout, Session as SessionModel
 from app.models.analysis import Action, Analysis, Frame, BladeState
-from app.schemas.bout import BoutRead
+from app.schemas.bout import BoutRead, BoutSummary
 
 router = APIRouter(prefix="/bouts", tags=["bouts"])
 
@@ -21,9 +21,28 @@ class BboxModel(BaseModel):
     y2: float
 
 
+class DetectionSelection(BaseModel):
+    frame_index: int
+    detection_index: int
+
+
 class ConfigureROIRequest(BaseModel):
     fencer_bbox: BboxModel | None = None
     opponent_bbox: BboxModel | None = None
+    fencer_detection: DetectionSelection | None = None
+    opponent_detection: DetectionSelection | None = None
+
+
+@router.get("/", response_model=list[BoutSummary])
+def list_bouts(fencer_id: int, db: Session = Depends(get_db)):
+    bouts = (
+        db.query(Bout)
+        .join(SessionModel, Bout.session_id == SessionModel.id)
+        .filter(SessionModel.fencer_id == fencer_id)
+        .order_by(Bout.created_at.desc())
+        .all()
+    )
+    return bouts
 
 
 @router.get("/{bout_id}", response_model=BoutRead)
@@ -87,12 +106,44 @@ def get_thumbnail(bout_id: int, db: Session = Depends(get_db)):
     return FileResponse(thumb_path, media_type="image/jpeg")
 
 
+@router.get("/{bout_id}/preview")
+def get_preview(bout_id: int, db: Session = Depends(get_db)):
+    bout = db.get(Bout, bout_id)
+    if not bout:
+        raise HTTPException(status_code=404, detail="Bout not found")
+    if bout.status == "failed":
+        return {"status": "failed", "error": bout.error}
+    if bout.preview_data is None:
+        return {"status": "processing"}
+    return {"status": "ready", "preview_data": bout.preview_data}
+
+
+@router.post("/{bout_id}/preview")
+def trigger_preview(bout_id: int, db: Session = Depends(get_db)):
+    bout = db.get(Bout, bout_id)
+    if not bout:
+        raise HTTPException(status_code=404, detail="Bout not found")
+    if bout.status not in ("configuring", "failed", "preview_ready"):
+        raise HTTPException(status_code=400, detail="Bout is not in a state that allows preview")
+    # Guard against double-dispatch
+    if bout.preview_data is not None and bout.status == "preview_ready":
+        return {"bout_id": bout_id, "status": "preview_ready", "preview_data": bout.preview_data}
+    bout.status = "previewing"
+    bout.preview_data = None
+    db.commit()
+    from app.tasks import dispatch_preview
+    task = dispatch_preview(bout_id, f"/app/uploads/{bout.video_key}")
+    bout.task_id = task.id
+    db.commit()
+    return {"bout_id": bout_id, "status": "previewing", "task_id": task.id}
+
+
 @router.post("/{bout_id}/roi")
 def configure_roi(bout_id: int, body: ConfigureROIRequest, db: Session = Depends(get_db)):
     bout = db.get(Bout, bout_id)
     if not bout:
         raise HTTPException(status_code=404, detail="Bout not found")
-    if bout.status not in ("configuring", "failed"):
+    if bout.status not in ("configuring", "preview_ready", "failed"):
         raise HTTPException(status_code=400, detail="Bout is not awaiting configuration")
 
     # Clean slate for re-analysis of failed bouts
@@ -107,8 +158,24 @@ def configure_roi(bout_id: int, body: ConfigureROIRequest, db: Session = Depends
         bout.error = None
         bout.pipeline_progress = None
 
-    bout.fencer_bbox = body.fencer_bbox.model_dump() if body.fencer_bbox else None
-    bout.opponent_bbox = body.opponent_bbox.model_dump() if body.opponent_bbox else None
+    # Resolve detection selections to bboxes from preview data
+    if body.fencer_detection and bout.preview_data:
+        frame_data = bout.preview_data["frames"][body.fencer_detection.frame_index]
+        det = frame_data["detections"][body.fencer_detection.detection_index]
+        bout.fencer_bbox = det["bbox"]
+    elif body.fencer_bbox:
+        bout.fencer_bbox = body.fencer_bbox.model_dump()
+    else:
+        bout.fencer_bbox = None
+
+    if body.opponent_detection and bout.preview_data:
+        frame_data = bout.preview_data["frames"][body.opponent_detection.frame_index]
+        det = frame_data["detections"][body.opponent_detection.detection_index]
+        bout.opponent_bbox = det["bbox"]
+    elif body.opponent_bbox:
+        bout.opponent_bbox = body.opponent_bbox.model_dump()
+    else:
+        bout.opponent_bbox = None
     bout.status = "queued"
     db.commit()
 

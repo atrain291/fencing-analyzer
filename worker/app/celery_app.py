@@ -7,7 +7,7 @@ celery_app = Celery(
     "fencing_worker",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["app.tasks.video_pipeline"],
+    include=["app.tasks.video_pipeline", "app.tasks.preview"],
 )
 
 celery_app.conf.update(

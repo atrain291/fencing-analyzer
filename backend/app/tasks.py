@@ -12,3 +12,12 @@ def dispatch_pipeline(bout_id: int, video_path: str):
         args=[bout_id, video_path],
         queue="video_pipeline",
     )
+
+
+def dispatch_preview(bout_id: int, video_path: str):
+    """Dispatch the skeleton preview task to the worker queue."""
+    return celery_app.send_task(
+        "worker.tasks.preview.preview_skeletons",
+        args=[bout_id, video_path],
+        queue="video_pipeline",
+    )
