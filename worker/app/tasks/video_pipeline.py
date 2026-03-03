@@ -59,10 +59,17 @@ def _update_progress(bout_id: int, stage: str, pct: int, db, extra: dict | None 
     except Exception:
         pass
 
-    progress = {"stage": stage, "pct": pct, **metrics, **(extra or {})}
-
     from app.models import Bout
     bout = db.query(Bout).get(bout_id)
+
+    # Merge with existing pipeline_progress so fields from earlier stages
+    # (e.g. total_frames set during ingest) are preserved across updates.
+    existing = {}
+    if bout and isinstance(bout.pipeline_progress, dict):
+        existing = dict(bout.pipeline_progress)
+
+    progress = {**existing, "stage": stage, "pct": pct, **metrics, **(extra or {})}
+
     if bout:
         bout.pipeline_progress = progress
         db.commit()
@@ -129,7 +136,23 @@ def run_pipeline(self, bout_id: int, video_path: str):
 
             # Stage 5 — LLM synthesis (90%)
             _update_progress(bout_id, "llm_synthesis", 90, db)
-            coaching_text = synthesize_coaching_feedback(bout_id, pose_results, action_results, db)
+
+            # Collect blade state data for LLM prompt enrichment
+            from app.models.analysis import BladeState
+            blade_rows = (db.query(BladeState)
+                          .join(Frame, BladeState.frame_id == Frame.id)
+                          .filter(Frame.bout_id == bout_id)
+                          .order_by(Frame.timestamp_ms)
+                          .all())
+            blade_states = [
+                {"speed": bs.speed, "tip_xyz": bs.tip_xyz, "velocity_xyz": bs.velocity_xyz}
+                for bs in blade_rows
+            ]
+            logger.info("Loaded %d blade states for LLM synthesis", len(blade_states))
+
+            coaching_text = synthesize_coaching_feedback(
+                bout_id, pose_results, action_results, blade_states, db
+            )
 
             # Persist analysis
             from app.models import Analysis

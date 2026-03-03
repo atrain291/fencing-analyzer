@@ -22,6 +22,7 @@ export default function ConfigureROI() {
   const [drag, setDrag] = useState<DragState | null>(null)
   const [imgLoaded, setImgLoaded] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const thumbnailUrl = boutId ? getThumbnailUrl(Number(boutId)) : ''
 
@@ -125,7 +126,6 @@ export default function ConfigureROI() {
       const box: Bbox = { x1, y1, x2, y2 }
       if (mode === 'fencer') {
         setFencerBox(box)
-        setMode('opponent') // auto-switch to opponent after drawing fencer
       } else {
         setOpponentBox(box)
       }
@@ -136,6 +136,7 @@ export default function ConfigureROI() {
   async function handleStart(skipROI = false) {
     if (!boutId) return
     setSubmitting(true)
+    setError(null)
     try {
       await configureROI(
         Number(boutId),
@@ -143,7 +144,9 @@ export default function ConfigureROI() {
         skipROI ? null : opponentBox,
       )
       navigate(`/bouts/${boutId}/processing`)
-    } catch (err) {
+    } catch (err: any) {
+      const msg = err?.response?.data?.detail || err?.message || 'Unknown error'
+      setError(msg)
       console.error(err)
       setSubmitting(false)
     }
@@ -154,8 +157,9 @@ export default function ConfigureROI() {
       <div>
         <h1 className="text-xl font-bold">Configure Analysis — Bout #{boutId}</h1>
         <p className="text-sm text-gray-400 mt-1">
-          Draw a box around each fencer so the AI knows who to track. This fixes tracking in
-          tournament footage with spectators and officials in the background.
+          Draw a box around yourself so the AI knows who to track. Optionally mark your opponent
+          too, or let the tracker auto-detect them. This fixes tracking in tournament footage
+          with spectators and officials in the background.
         </p>
       </div>
 
@@ -210,16 +214,21 @@ export default function ConfigureROI() {
       </div>
 
       <p className="text-xs text-gray-500">
-        Drag to draw a box around each fencer. The box only needs to cover roughly where they
-        start — the tracker will follow them from there. You can skip this step if there are only
-        two people in the frame.
+        Drag to draw a box around yourself (required). The opponent box is optional — if you skip
+        it, the tracker will automatically pick the other person in the frame. The box only needs
+        to cover roughly where they start. You can skip ROI entirely if there are only two people
+        in the frame.
       </p>
+
+      {error && (
+        <p className="text-sm text-red-400">{error}</p>
+      )}
 
       {/* Action buttons */}
       <div className="flex items-center gap-4">
         <button
           onClick={() => handleStart(false)}
-          disabled={submitting || (!fencerBox && !opponentBox)}
+          disabled={submitting || !fencerBox}
           className="px-6 py-2.5 bg-brand-500 hover:bg-brand-400 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg text-sm font-semibold transition-colors"
         >
           {submitting ? 'Starting…' : 'Start Analysis'}

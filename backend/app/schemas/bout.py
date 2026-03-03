@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class BladeStateRead(BaseModel):
@@ -21,6 +21,30 @@ class FrameRead(BaseModel):
     blade_state: BladeStateRead | None = None
 
 
+class ActionRead(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    bout_id: int
+    type: str
+    start_ms: int
+    end_ms: int
+    outcome: str | None
+    confidence: float | None
+
+
+class AnalysisRead(BaseModel):
+    model_config = {"from_attributes": True, "populate_by_name": True}
+
+    id: int
+    bout_id: int
+    coaching_text: str | None = Field(
+        validation_alias=AliasChoices("coaching_text", "llm_summary"),
+    )
+    patterns: dict | None
+    practice_plan: dict | None
+
+
 class BoutRead(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -33,6 +57,8 @@ class BoutRead(BaseModel):
     pipeline_progress: dict
     created_at: datetime
     frames: list[FrameRead] = []
+    actions: list[ActionRead] = []
+    analysis: AnalysisRead | None = None
 
 
 class BoutUploadResponse(BaseModel):

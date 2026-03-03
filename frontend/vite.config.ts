@@ -16,6 +16,12 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_API_URL ?? 'http://localhost:8000',
         changeOrigin: true,
+        timeout: 600_000,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (_proxyReq, req) => {
+            req.socket.setTimeout(0)
+          })
+        },
       },
       '/uploads': {
         target: process.env.VITE_API_URL ?? 'http://localhost:8000',

@@ -1,4 +1,5 @@
 import os
+import statistics
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse
@@ -7,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models.bout import Bout
-from app.models.analysis import Frame, BladeState
+from app.models.analysis import Action, Analysis, Frame, BladeState
 from app.schemas.bout import BoutRead
 
 router = APIRouter(prefix="/bouts", tags=["bouts"])
@@ -29,7 +30,11 @@ class ConfigureROIRequest(BaseModel):
 def get_bout(bout_id: int, db: Session = Depends(get_db)):
     bout = (
         db.query(Bout)
-        .options(joinedload(Bout.frames).joinedload(Frame.blade_state))
+        .options(
+            joinedload(Bout.frames).joinedload(Frame.blade_state),
+            joinedload(Bout.actions),
+            joinedload(Bout.analysis),
+        )
         .filter(Bout.id == bout_id)
         .first()
     )
@@ -87,8 +92,20 @@ def configure_roi(bout_id: int, body: ConfigureROIRequest, db: Session = Depends
     bout = db.get(Bout, bout_id)
     if not bout:
         raise HTTPException(status_code=404, detail="Bout not found")
-    if bout.status != "configuring":
+    if bout.status not in ("configuring", "failed"):
         raise HTTPException(status_code=400, detail="Bout is not awaiting configuration")
+
+    # Clean slate for re-analysis of failed bouts
+    if bout.status == "failed":
+        db.query(BladeState).filter(
+            BladeState.frame_id.in_(
+                db.query(Frame.id).filter(Frame.bout_id == bout_id)
+            )
+        ).delete(synchronize_session=False)
+        db.query(Action).filter(Action.bout_id == bout_id).delete(synchronize_session=False)
+        db.query(Frame).filter(Frame.bout_id == bout_id).delete(synchronize_session=False)
+        bout.error = None
+        bout.pipeline_progress = None
 
     bout.fencer_bbox = body.fencer_bbox.model_dump() if body.fencer_bbox else None
     bout.opponent_bbox = body.opponent_bbox.model_dump() if body.opponent_bbox else None
@@ -101,3 +118,94 @@ def configure_roi(bout_id: int, body: ConfigureROIRequest, db: Session = Depends
     db.commit()
 
     return {"bout_id": bout_id, "status": "queued", "task_id": task.id}
+
+
+def _coeff_of_variation_score(values: list[float]) -> float:
+    """Return 100 * (1 - CV) clamped to [0, 100].  CV = std_dev / mean."""
+    if len(values) < 2:
+        return 100.0
+    mean = statistics.mean(values)
+    if mean == 0:
+        return 100.0
+    cv = statistics.stdev(values) / mean
+    return max(0.0, min(100.0, 100.0 * (1.0 - cv)))
+
+
+@router.get("/{bout_id}/drill-report")
+def get_drill_report(bout_id: int, db: Session = Depends(get_db)):
+    bout = db.get(Bout, bout_id)
+    if not bout:
+        raise HTTPException(status_code=404, detail="Bout not found")
+    if bout.status != "done":
+        raise HTTPException(status_code=400, detail="Pipeline has not completed for this bout")
+
+    actions = (
+        db.query(Action)
+        .filter(Action.bout_id == bout_id)
+        .order_by(Action.start_ms)
+        .all()
+    )
+
+    if not actions:
+        raise HTTPException(status_code=404, detail="No actions detected for this bout")
+
+    # ---- Action breakdown ----
+    from collections import defaultdict
+    by_type: dict[str, list[float]] = defaultdict(list)
+    for a in actions:
+        duration = float(a.end_ms - a.start_ms)
+        by_type[a.type].append(duration)
+
+    action_breakdown = {}
+    all_consistency_scores = []
+    for action_type, durations in by_type.items():
+        avg_dur = statistics.mean(durations)
+        score = _coeff_of_variation_score(durations)
+        action_breakdown[action_type] = {
+            "count": len(durations),
+            "avg_duration_ms": round(avg_dur, 1),
+            "consistency_score": round(score, 1),
+        }
+        all_consistency_scores.append(score)
+
+    total_actions = len(actions)
+    total_duration_ms = actions[-1].end_ms - actions[0].start_ms
+    tempo = (total_actions / (total_duration_ms / 1000.0)) if total_duration_ms > 0 else 0.0
+
+    # ---- Rhythm score: consistency of gaps between consecutive actions ----
+    gaps = []
+    for i in range(1, len(actions)):
+        gap = float(actions[i].start_ms - actions[i - 1].end_ms)
+        gaps.append(gap)
+    rhythm_score = _coeff_of_variation_score(gaps) if gaps else 100.0
+
+    # ---- Tempo score: CV of rolling 5-action window action rates ----
+    window_size = 5
+    window_rates = []
+    for i in range(len(actions) - window_size + 1):
+        window_actions = actions[i : i + window_size]
+        window_dur_ms = window_actions[-1].end_ms - window_actions[0].start_ms
+        if window_dur_ms > 0:
+            rate = window_size / (window_dur_ms / 1000.0)
+            window_rates.append(rate)
+    tempo_score = _coeff_of_variation_score(window_rates) if window_rates else 100.0
+
+    # ---- Overall score ----
+    avg_consistency = statistics.mean(all_consistency_scores) if all_consistency_scores else 100.0
+    overall_score = 0.4 * rhythm_score + 0.3 * tempo_score + 0.3 * avg_consistency
+
+    # ---- Auto-detect drill type from action distribution ----
+    footwork_types = {"advance", "retreat", "lunge"}
+    footwork_count = sum(len(by_type[t]) for t in footwork_types if t in by_type)
+    drill_type = "footwork" if footwork_count >= total_actions * 0.5 else "mixed"
+
+    return {
+        "drill_type": drill_type,
+        "total_actions": total_actions,
+        "total_duration_ms": total_duration_ms,
+        "tempo": round(tempo, 2),
+        "action_breakdown": action_breakdown,
+        "rhythm_score": round(rhythm_score, 1),
+        "tempo_score": round(tempo_score, 1),
+        "overall_score": round(overall_score, 1),
+    }

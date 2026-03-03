@@ -1,11 +1,49 @@
-import { useParams, useNavigate } from 'react-router-dom'
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { getBout, deleteBout, Frame, Keypoint, BladeState } from '@/api/bouts'
-import { Trash2, Maximize2, Minimize2 } from 'lucide-react'
+import { Trash2, Maximize2, Minimize2, GripHorizontal, Activity } from 'lucide-react'
 
 interface AnalysisSummary {
   llm_summary: string
   technique_scores: Record<string, number>
+}
+
+interface Action {
+  id: number
+  type: string
+  start_ms: number
+  end_ms: number
+  confidence: number | null
+}
+
+const ACTION_COLORS: Record<string, string> = {
+  lunge: '#ef4444',
+  advance: '#22c55e',
+  retreat: '#3b82f6',
+  en_garde: '#6b7280',
+  fleche: '#f59e0b',
+  step_lunge: '#ec4899',
+  check_step: '#a78bfa',
+  recovery: '#14b8a6',
+}
+
+const ACTION_LABELS: Record<string, string> = {
+  lunge: 'Lunge',
+  advance: 'Advance',
+  retreat: 'Retreat',
+  en_garde: 'En Garde',
+  fleche: 'Fleche',
+  step_lunge: 'Step-Lunge',
+  check_step: 'Check Step',
+  recovery: 'Recovery',
+}
+
+function formatMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  const millis = Math.floor(ms % 1000)
+  return `${min}:${String(sec).padStart(2, '0')}.${String(millis).padStart(3, '0')}`
 }
 
 const SKELETON_EDGES: [string, string][] = [
@@ -23,6 +61,14 @@ const SKELETON_EDGES: [string, string][] = [
 const CONFIDENCE_THRESHOLD = 0.3
 
 const SPEEDS = [0.25, 0.5, 1, 2]
+
+const TRAIL_LENGTH = 30
+
+interface TipTrailPoint {
+  x: number
+  y: number
+  timestamp_ms: number
+}
 
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
@@ -89,18 +135,42 @@ function drawBlade(
   ctx.globalAlpha = 1
 }
 
+function drawTipTrail(
+  ctx: CanvasRenderingContext2D,
+  trail: TipTrailPoint[],
+  width: number,
+  height: number
+) {
+  if (trail.length < 2) return
+
+  for (let i = 1; i < trail.length; i++) {
+    const prev = trail[i - 1]
+    const curr = trail[i]
+
+    // Progress from 0 (oldest) to 1 (newest)
+    const progress = i / (trail.length - 1)
+
+    ctx.strokeStyle = `rgba(34, 197, 94, ${progress * 0.9})`
+    ctx.lineWidth = 1 + progress * 2
+    ctx.beginPath()
+    ctx.moveTo(prev.x * width, prev.y * height)
+    ctx.lineTo(curr.x * width, curr.y * height)
+    ctx.stroke()
+  }
+}
+
 function findFrameInterval(
   frames: Frame[],
   timestampMs: number
-): { a: Frame; b: Frame; t: number } | null {
+): { a: Frame; b: Frame; t: number; loIndex: number } | null {
   if (frames.length === 0) return null
-  if (frames.length === 1) return { a: frames[0], b: frames[0], t: 0 }
+  if (frames.length === 1) return { a: frames[0], b: frames[0], t: 0, loIndex: 0 }
 
   let lo = 0
   let hi = frames.length - 1
 
-  if (timestampMs <= frames[lo].timestamp_ms) return { a: frames[lo], b: frames[lo], t: 0 }
-  if (timestampMs >= frames[hi].timestamp_ms) return { a: frames[hi], b: frames[hi], t: 0 }
+  if (timestampMs <= frames[lo].timestamp_ms) return { a: frames[lo], b: frames[lo], t: 0, loIndex: 0 }
+  if (timestampMs >= frames[hi].timestamp_ms) return { a: frames[hi], b: frames[hi], t: 0, loIndex: hi }
 
   while (lo + 1 < hi) {
     const mid = (lo + hi) >>> 1
@@ -115,7 +185,7 @@ function findFrameInterval(
   const b = frames[hi]
   const span = b.timestamp_ms - a.timestamp_ms
   const t = span > 0 ? (timestampMs - a.timestamp_ms) / span : 0
-  return { a, b, t }
+  return { a, b, t, loIndex: lo }
 }
 
 function interpolatePose(
@@ -162,10 +232,33 @@ export default function VideoReview() {
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null)
   const [videoUrl, setVideoUrl] = useState('')
   const [frames, setFrames] = useState<Frame[]>([])
+  const [actions, setActions] = useState<Action[]>([])
   const [speed, setSpeed] = useState(1)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  const [videoDurationMs, setVideoDurationMs] = useState(0)
+  const [hoveredAction, setHoveredAction] = useState<Action | null>(null)
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const [showFencerSkeleton, setShowFencerSkeleton] = useState(true)
+  const [showOpponentSkeleton, setShowOpponentSkeleton] = useState(true)
+  const [showBlade, setShowBlade] = useState(true)
+  const [liveBladeState, setLiveBladeState] = useState<BladeState | null>(null)
+  const [liveFrameIndex, setLiveFrameIndex] = useState(0)
   const framesRef = useRef<Frame[]>([])
   const rafRef = useRef<number | null>(null)
+  const tipTrailRef = useRef<TipTrailPoint[]>([])
+  const timelineRef = useRef<HTMLDivElement>(null)
+  const scrubberRef = useRef<HTMLDivElement>(null)
+  const showFencerRef = useRef(true)
+  const showOpponentRef = useRef(true)
+  const showBladeRef = useRef(true)
+  const [scrubberDragging, setScrubberDragging] = useState(false)
+  const [scrubberHover, setScrubberHover] = useState(false)
+  const [scrubberHoverFraction, setScrubberHoverFraction] = useState(0)
+  const [videoHeight, setVideoHeight] = useState<number | null>(null)
+  const resizeDragging = useRef(false)
+  const resizeStartY = useRef(0)
+  const resizeStartHeight = useRef(0)
 
   function handleSpeed(s: number) {
     setSpeed(s)
@@ -180,9 +273,83 @@ export default function VideoReview() {
     }
   }
 
+  const scrubberSeek = useCallback((clientX: number) => {
+    const bar = scrubberRef.current
+    const video = videoRef.current
+    if (!bar || !video || !video.duration || !isFinite(video.duration)) return
+    const rect = bar.getBoundingClientRect()
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    video.currentTime = fraction * video.duration
+  }, [])
+
+  const scrubberUpdateHover = useCallback((clientX: number) => {
+    const bar = scrubberRef.current
+    if (!bar) return
+    const rect = bar.getBoundingClientRect()
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    setScrubberHoverFraction(fraction)
+  }, [])
+
+  // Global mousemove/mouseup for scrubber dragging
+  useEffect(() => {
+    if (!scrubberDragging) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      scrubberSeek(e.clientX)
+      scrubberUpdateHover(e.clientX)
+    }
+    const onMouseUp = () => {
+      setScrubberDragging(false)
+      setScrubberHover(false)
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [scrubberDragging, scrubberSeek, scrubberUpdateHover])
+
+  // Resize handle drag logic
+  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    resizeDragging.current = true
+    resizeStartY.current = e.clientY
+    const container = containerRef.current
+    resizeStartHeight.current = container ? container.getBoundingClientRect().height : 400
+  }, [])
+
+  const onResizeDoubleClick = useCallback(() => {
+    setVideoHeight(null)
+  }, [])
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!resizeDragging.current) return
+      const delta = e.clientY - resizeStartY.current
+      const newHeight = Math.max(200, Math.min(window.innerHeight * 0.9, resizeStartHeight.current + delta))
+      setVideoHeight(newHeight)
+    }
+    const onMouseUp = () => {
+      resizeDragging.current = false
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [])
+
   useEffect(() => {
     framesRef.current = frames
   }, [frames])
+
+  useEffect(() => { showFencerRef.current = showFencerSkeleton }, [showFencerSkeleton])
+  useEffect(() => { showOpponentRef.current = showOpponentSkeleton }, [showOpponentSkeleton])
+  useEffect(() => { showBladeRef.current = showBlade }, [showBlade])
 
   useEffect(() => {
     if (!boutId) return
@@ -190,6 +357,7 @@ export default function VideoReview() {
       if (data.video_url) setVideoUrl(data.video_url)
       if ((data as any).analysis) setAnalysis((data as any).analysis)
       if (data.frames) setFrames(data.frames)
+      if ((data as any).actions) setActions((data as any).actions)
     })
   }, [boutId])
 
@@ -217,22 +385,39 @@ export default function VideoReview() {
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    const currentTimeMs = video.currentTime * 1000
-    const interval = findFrameInterval(currentFrames, currentTimeMs)
+    // Update timeline playhead position
+    const timeMs = video.currentTime * 1000
+    setCurrentTimeMs(timeMs)
+    if (video.duration && isFinite(video.duration)) {
+      setVideoDurationMs(video.duration * 1000)
+    }
+
+    const interval = findFrameInterval(currentFrames, timeMs)
     if (!interval) return
 
-    const { a, b, t } = interval
+    const { a, b, t, loIndex } = interval
+
+    // Update live frame data for the stats panel
+    setLiveFrameIndex(loIndex)
+    if (a.blade_state) {
+      const bs = b.blade_state
+        ? interpolateBladeState(a.blade_state, b.blade_state, t)
+        : a.blade_state
+      setLiveBladeState(bs)
+    } else {
+      setLiveBladeState(null)
+    }
 
     // Draw fencer skeleton (orange)
-    if (a.fencer_pose) {
+    if (showFencerRef.current && a.fencer_pose) {
       const pose = b.fencer_pose
         ? interpolatePose(a.fencer_pose, b.fencer_pose, t)
         : a.fencer_pose
       drawSkeleton(ctx, pose, canvas.width, canvas.height, '#f97316')
     }
 
-    // Draw blade overlay (green)
-    if (a.blade_state && a.fencer_pose) {
+    // Draw blade overlay (green) + tip trajectory trail
+    if (showBladeRef.current && a.blade_state && a.fencer_pose) {
       const bladeState = b.blade_state
         ? interpolateBladeState(a.blade_state, b.blade_state, t)
         : a.blade_state
@@ -240,10 +425,23 @@ export default function VideoReview() {
         ? interpolatePose(a.fencer_pose, b.fencer_pose, t)
         : a.fencer_pose
       drawBlade(ctx, pose, bladeState, canvas.width, canvas.height)
+
+      // Update tip trajectory trail buffer
+      const tip = bladeState.tip_xyz
+      if (tip.x !== 0 || tip.y !== 0) {
+        const trail = tipTrailRef.current
+        trail.push({ x: tip.x, y: tip.y, timestamp_ms: timeMs })
+        if (trail.length > TRAIL_LENGTH) {
+          trail.splice(0, trail.length - TRAIL_LENGTH)
+        }
+      }
+
+      // Draw the trajectory trail
+      drawTipTrail(ctx, tipTrailRef.current, canvas.width, canvas.height)
     }
 
     // Draw opponent skeleton (blue)
-    if (a.opponent_pose) {
+    if (showOpponentRef.current && a.opponent_pose) {
       const pose = b.opponent_pose
         ? interpolatePose(a.opponent_pose, b.opponent_pose, t)
         : a.opponent_pose
@@ -281,8 +479,16 @@ export default function VideoReview() {
     const handlePlay = () => startLoop()
     const handlePause = () => stopLoop()
     const handleEnded = () => stopLoop()
-    const handleSeeked = () => renderSkeleton()
-    const handleLoadedMetadata = () => renderSkeleton()
+    const handleSeeked = () => {
+      tipTrailRef.current = []
+      renderSkeleton()
+    }
+    const handleLoadedMetadata = () => {
+      renderSkeleton()
+      if (video.duration && isFinite(video.duration)) {
+        setVideoDurationMs(video.duration * 1000)
+      }
+    }
 
     video.addEventListener('play', handlePlay)
     video.addEventListener('pause', handlePause)
@@ -300,20 +506,41 @@ export default function VideoReview() {
     }
   }, [renderSkeleton])
 
+  // Derive the currently active action from video timestamp
+  const activeAction = useMemo(() => {
+    return actions.find(a => currentTimeMs >= a.start_ms && currentTimeMs <= a.end_ms) ?? null
+  }, [actions, currentTimeMs])
+
+  // Speed color coding: green (<1), yellow (1-3), red (>3)
+  function speedColor(spd: number | null): string {
+    if (spd == null) return 'text-gray-500'
+    if (spd < 1) return 'text-green-400'
+    if (spd <= 3) return 'text-yellow-400'
+    return 'text-red-400'
+  }
+
   return (
     <div className="max-w-screen-2xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">Bout Review — #{boutId}</h1>
-        <button
-          onClick={async () => {
-            if (!window.confirm('Delete this bout and its video? This cannot be undone.')) return
-            await deleteBout(Number(boutId))
-            navigate('/')
-          }}
-          className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-medium transition-colors"
-        >
-          <Trash2 size={14} /> Delete Bout
-        </button>
+        <div className="flex items-center gap-3">
+          <Link
+            to={`/bouts/${boutId}/drill`}
+            className="flex items-center gap-2 px-4 py-2 bg-brand-500 hover:bg-sky-400 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Activity size={14} /> Drill Report
+          </Link>
+          <button
+            onClick={async () => {
+              if (!window.confirm('Delete this bout and its video? This cannot be undone.')) return
+              await deleteBout(Number(boutId))
+              navigate('/')
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Trash2 size={14} /> Delete Bout
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -321,7 +548,12 @@ export default function VideoReview() {
         <div className="lg:col-span-3 space-y-3">
           <div
             ref={containerRef}
-            className={`relative bg-black rounded-xl overflow-hidden aspect-video ${isFullscreen ? 'rounded-none' : ''}`}
+            className={[
+              'relative bg-black rounded-xl overflow-hidden',
+              videoHeight == null ? 'aspect-video' : '',
+              isFullscreen ? 'rounded-none' : '',
+            ].filter(Boolean).join(' ')}
+            style={videoHeight != null ? { height: `${videoHeight}px` } : undefined}
           >
             <button
               onClick={toggleFullscreen}
@@ -340,23 +572,237 @@ export default function VideoReview() {
               ref={canvasRef}
               className="absolute inset-0 w-full h-full pointer-events-none"
             />
+            {/* Resize handle */}
+            {!isFullscreen && (
+              <div
+                className="absolute bottom-0 left-0 right-0 h-2 cursor-row-resize group z-10 flex items-center justify-center"
+                onMouseDown={onResizeMouseDown}
+                onDoubleClick={onResizeDoubleClick}
+                title="Drag to resize video — double-click to reset"
+              >
+                <div className="w-12 h-1 rounded-full bg-gray-600 group-hover:bg-gray-400 transition-colors" />
+              </div>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">Speed</span>
-            {SPEEDS.map(s => (
+          {/* Custom Scrubber Bar */}
+          {videoDurationMs > 0 && (
+            <div
+              className="relative group px-1"
+              style={{ paddingTop: '10px', paddingBottom: '2px' }}
+            >
+              {/* Time tooltip */}
+              {(scrubberDragging || scrubberHover) && (
+                <div
+                  className="absolute bottom-full mb-1.5 px-1.5 py-0.5 bg-gray-950 border border-gray-700 rounded text-[11px] text-gray-200 font-mono pointer-events-none whitespace-nowrap z-20"
+                  style={{
+                    left: `${(scrubberDragging
+                      ? (currentTimeMs / videoDurationMs)
+                      : scrubberHoverFraction
+                    ) * 100}%`,
+                    transform: 'translateX(-50%)',
+                  }}
+                >
+                  {formatMs(
+                    scrubberDragging
+                      ? currentTimeMs
+                      : scrubberHoverFraction * videoDurationMs
+                  )}
+                </div>
+              )}
+              {/* Track */}
+              <div
+                ref={scrubberRef}
+                className="relative w-full h-1.5 bg-gray-700 rounded-full cursor-pointer"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  setScrubberDragging(true)
+                  scrubberSeek(e.clientX)
+                  scrubberUpdateHover(e.clientX)
+                }}
+                onMouseEnter={() => setScrubberHover(true)}
+                onMouseLeave={() => { if (!scrubberDragging) setScrubberHover(false) }}
+                onMouseMove={(e) => { if (!scrubberDragging) scrubberUpdateHover(e.clientX) }}
+              >
+                {/* Filled portion */}
+                <div
+                  className="absolute inset-y-0 left-0 bg-white rounded-full pointer-events-none"
+                  style={{
+                    width: `${(currentTimeMs / videoDurationMs) * 100}%`,
+                  }}
+                />
+                {/* Thumb */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 pointer-events-none z-10"
+                  style={{
+                    left: `${(currentTimeMs / videoDurationMs) * 100}%`,
+                  }}
+                >
+                  <div
+                    className={[
+                      'w-3 h-3 -ml-1.5 bg-white rounded-full shadow-md transition-transform duration-100',
+                      scrubberDragging || scrubberHover ? 'scale-125' : 'scale-0 group-hover:scale-100',
+                    ].join(' ')}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Action Timeline */}
+          {actions.length > 0 && videoDurationMs > 0 && (
+            <div className="bg-gray-900 rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                  Action Timeline
+                </h3>
+                <div className="flex items-center gap-3">
+                  {Object.entries(ACTION_COLORS).map(([type, color]) => (
+                    <div key={type} className="flex items-center gap-1">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{ backgroundColor: color }}
+                      />
+                      <span className="text-[10px] text-gray-500">
+                        {ACTION_LABELS[type] ?? type}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div
+                ref={timelineRef}
+                className="relative h-8 bg-gray-800 rounded-md cursor-pointer overflow-hidden"
+                onClick={(e) => {
+                  const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
+                  const fraction = (e.clientX - rect.left) / rect.width
+                  const seekMs = fraction * videoDurationMs
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = seekMs / 1000
+                  }
+                }}
+              >
+                {/* Action segments */}
+                {actions.map((action) => {
+                  const left = (action.start_ms / videoDurationMs) * 100
+                  const width = ((action.end_ms - action.start_ms) / videoDurationMs) * 100
+                  const color = ACTION_COLORS[action.type] ?? '#9ca3af'
+                  return (
+                    <div
+                      key={action.id}
+                      className="absolute top-1 bottom-1 rounded-sm transition-opacity hover:opacity-100"
+                      style={{
+                        left: `${left}%`,
+                        width: `${Math.max(width, 0.3)}%`,
+                        backgroundColor: color,
+                        opacity: 0.85,
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (videoRef.current) {
+                          videoRef.current.currentTime = action.start_ms / 1000
+                        }
+                      }}
+                      onMouseEnter={(e) => {
+                        setHoveredAction(action)
+                        const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
+                        setTooltipPos({ x: rect.left + rect.width / 2, y: rect.top })
+                      }}
+                      onMouseLeave={() => setHoveredAction(null)}
+                    />
+                  )
+                })}
+                {/* Current time playhead */}
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-white z-10 pointer-events-none"
+                  style={{
+                    left: `${(currentTimeMs / videoDurationMs) * 100}%`,
+                  }}
+                />
+              </div>
+              {/* Tooltip */}
+              {hoveredAction && (
+                <div
+                  className="fixed z-50 px-2.5 py-1.5 bg-gray-950 border border-gray-700 rounded-md shadow-lg pointer-events-none"
+                  style={{
+                    left: `${tooltipPos.x}px`,
+                    top: `${tooltipPos.y - 8}px`,
+                    transform: 'translate(-50%, -100%)',
+                  }}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="inline-block w-2 h-2 rounded-sm"
+                      style={{ backgroundColor: ACTION_COLORS[hoveredAction.type] ?? '#9ca3af' }}
+                    />
+                    <span className="text-xs font-medium text-gray-200">
+                      {ACTION_LABELS[hoveredAction.type] ?? hoveredAction.type}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-0.5">
+                    {formatMs(hoveredAction.start_ms)} — {formatMs(hoveredAction.end_ms)}
+                    {hoveredAction.confidence != null && (
+                      <span className="ml-1.5 text-gray-500">
+                        ({Math.round(hoveredAction.confidence * 100)}%)
+                      </span>
+                    )}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">Speed</span>
+              {SPEEDS.map(s => (
+                <button
+                  key={s}
+                  onClick={() => handleSpeed(s)}
+                  className={[
+                    'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                    speed === s
+                      ? 'bg-brand-500 text-white'
+                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                  ].join(' ')}
+                >
+                  {s}×
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-gray-500">Overlays</span>
               <button
-                key={s}
-                onClick={() => handleSpeed(s)}
+                onClick={() => setShowFencerSkeleton(v => !v)}
                 className={[
-                  'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
-                  speed === s
-                    ? 'bg-brand-500 text-white'
-                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                  'px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors',
+                  showFencerSkeleton
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-gray-800 text-gray-500 hover:bg-gray-700',
                 ].join(' ')}
               >
-                {s}×
+                You
               </button>
-            ))}
+              <button
+                onClick={() => setShowOpponentSkeleton(v => !v)}
+                className={[
+                  'px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors',
+                  showOpponentSkeleton
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-800 text-gray-500 hover:bg-gray-700',
+                ].join(' ')}
+              >
+                Opponent
+              </button>
+              <button
+                onClick={() => setShowBlade(v => !v)}
+                className={[
+                  'px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors',
+                  showBlade
+                    ? 'bg-green-500 text-white'
+                    : 'bg-gray-800 text-gray-500 hover:bg-gray-700',
+                ].join(' ')}
+              >
+                Blade
+              </button>
+            </div>
           </div>
           <p className="text-xs text-gray-500">
             {frames.length > 0
@@ -367,6 +813,77 @@ export default function VideoReview() {
 
         {/* Analysis panel */}
         <div className="lg:col-span-1 space-y-4">
+          {/* Live Frame Data */}
+          <div className="bg-gray-800 rounded-xl p-4">
+            <h2 className="font-semibold mb-3 text-sm text-gray-400 uppercase tracking-wider">
+              Frame Data
+            </h2>
+            {frames.length > 0 ? (
+              <div className="space-y-3">
+                {/* Frame Number */}
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-gray-400">Frame</span>
+                  <span className="text-sm text-white font-mono">
+                    {liveFrameIndex + 1} / {frames.length}
+                  </span>
+                </div>
+
+                {/* Tip Speed */}
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-gray-400">Tip Speed</span>
+                  {liveBladeState?.speed != null ? (
+                    <span className={`text-sm font-mono font-medium ${speedColor(liveBladeState.speed)}`}>
+                      {liveBladeState.speed.toFixed(1)} m/s
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-500 font-mono">{'\u2014'}</span>
+                  )}
+                </div>
+
+                {/* Tip Position */}
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-gray-400">Tip Position</span>
+                  {liveBladeState ? (
+                    <span className="text-sm text-white font-mono">
+                      ({liveBladeState.tip_xyz.x.toFixed(3)}, {liveBladeState.tip_xyz.y.toFixed(3)})
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-500 font-mono">{'\u2014'}</span>
+                  )}
+                </div>
+
+                {/* Current Action */}
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-gray-400">Action</span>
+                  {activeAction ? (
+                    <span
+                      className="text-xs font-medium px-2 py-0.5 rounded-full"
+                      style={{
+                        backgroundColor: (ACTION_COLORS[activeAction.type] ?? '#6b7280') + '33',
+                        color: ACTION_COLORS[activeAction.type] ?? '#9ca3af',
+                        border: `1px solid ${ACTION_COLORS[activeAction.type] ?? '#6b7280'}66`,
+                      }}
+                    >
+                      {ACTION_LABELS[activeAction.type] ?? activeAction.type}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-500 font-mono">{'\u2014'}</span>
+                  )}
+                </div>
+
+                {/* Timestamp */}
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-gray-400">Time</span>
+                  <span className="text-sm text-white font-mono">
+                    {formatMs(currentTimeMs)}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No frame data available.</p>
+            )}
+          </div>
+
           <div className="bg-gray-900 rounded-xl p-4">
             <h2 className="font-semibold mb-3 text-sm text-gray-400 uppercase tracking-wider">
               AI Coaching Feedback

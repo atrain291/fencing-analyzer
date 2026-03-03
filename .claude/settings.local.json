@@ -21,7 +21,14 @@
       "Bash(pip install:*)",
       "Bash(podman run:*)",
       "Bash(podman inspect:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(findmnt:*)",
+      "Bash(podman info:*)",
+      "Bash(podman rm:*)",
+      "Bash(npx tsc:*)",
+      "Bash(./node_modules/.bin/tsc:*)",
+      "Bash(npx:*)",
+      "Bash(node_modules/.bin/tsc:*)"
     ]
   }
 }

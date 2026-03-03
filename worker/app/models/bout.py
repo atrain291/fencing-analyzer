@@ -14,3 +14,5 @@ class Bout(Base):
     error: Mapped[str | None] = mapped_column(String(2000))
     pipeline_progress: Mapped[dict] = mapped_column(JSON, default=dict)
     video_key: Mapped[str | None] = mapped_column(String(1024))
+    fencer_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    opponent_bbox: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -1,5 +1,6 @@
 """Stage 2 — Per-frame pose estimation using YOLOv8-Pose (CUDA)."""
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -9,13 +10,16 @@ logger = logging.getLogger(__name__)
 
 _model = None
 
+# Custom tracker config with increased track_buffer for occlusion resilience
+_TRACKER_CFG = os.path.join(os.path.dirname(__file__), "botsort_fencing.yaml")
+
 
 def _get_model():
     global _model
     if _model is None:
         from ultralytics import YOLO
-        _model = YOLO("yolov8n-pose.pt")  # downloads on first run; swap for larger model
-        logger.info("YOLOv8-Pose model loaded")
+        _model = YOLO("yolo11x-pose.pt")  # YOLO11 extra-large: 69.4M params, best accuracy
+        logger.info("YOLO11x-Pose model loaded")
     return _model
 
 
@@ -46,6 +50,28 @@ def _try_lock_id(result, bbox: dict, exclude_id: int | None) -> int | None:
         if _center_in_bbox(cx, cy, bbox):
             return int(tid)
     return None
+
+
+def _best_other_id(result, exclude_id: int) -> int | None:
+    """
+    Return the tracker ID of the highest-confidence detection that is NOT exclude_id.
+    Used to auto-assign the opponent when no opponent bbox was provided.
+    Returns None if no other detection exists or tracking IDs unavailable.
+    """
+    if result.boxes is None or result.boxes.id is None:
+        return None
+    track_ids = result.boxes.id.cpu().numpy().astype(int)
+    confs = result.boxes.conf.cpu().numpy()
+    best_tid = None
+    best_conf = -1.0
+    for i, tid in enumerate(track_ids):
+        if tid == exclude_id:
+            continue
+        c = float(confs[i]) if i < len(confs) else 0.0
+        if c > best_conf:
+            best_conf = c
+            best_tid = int(tid)
+    return best_tid
 
 
 def _get_kps_by_id(result, track_id: int):
@@ -79,8 +105,10 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     results_summary = []
     frame_idx = 0
     fps = video_info.get("fps", 30)
-    duration = video_info.get("duration", 0)
-    total_frames_hint = int(fps * duration) if duration else 0
+    total_frames_hint = video_info.get("total_frames", 0)
+    if not total_frames_hint:
+        duration = video_info.get("duration_s", 0) or video_info.get("duration", 0)
+        total_frames_hint = int(fps * duration) if duration else 0
 
     width  = video_info.get("width",  1920)
     height = video_info.get("height", 1080)
@@ -108,10 +136,22 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     frame_bytes = width * height * 3
     proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 4)
 
-    # Tracker ID locking state (set once per video, persist across frames)
+    # Tracker ID locking state (persist across frames)
     fencer_track_id: int | None = None
     opponent_track_id: int | None = None
     roi_mode = fencer_bbox is not None or opponent_bbox is not None
+
+    # Confirmation-based re-lock: when the locked ID goes missing, we look for
+    # a new ID in the ROI.  Only switch if the same new ID appears in the ROI
+    # for RELOCK_CONFIRM consecutive frames (filters transient occluders).
+    RELOCK_MIN_WAIT = 15       # don't even start looking for a new ID until this many missing frames
+    RELOCK_CONFIRM = 10        # new candidate must be in ROI for this many consecutive frames
+    fencer_missing_count = 0
+    fencer_candidate_id: int | None = None
+    fencer_candidate_count = 0
+    opponent_missing_count = 0
+    opponent_candidate_id: int | None = None
+    opponent_candidate_count = 0
 
     try:
         while True:
@@ -120,7 +160,8 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                 break
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
 
-            results = model.track(frame, persist=True, device="cuda", verbose=False)
+            results = model.track(frame, persist=True, device="cuda", verbose=False,
+                                  tracker=_TRACKER_CFG)
             result = results[0]
 
             timestamp_ms = int((frame_idx / fps) * 1000)
@@ -130,29 +171,106 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
 
             if result.keypoints is not None and len(result.keypoints) > 0:
                 if roi_mode:
-                    # Try to lock tracker IDs from ROI (keeps trying each frame until locked)
-                    if fencer_bbox is not None and fencer_track_id is None:
-                        fencer_track_id = _try_lock_id(result, fencer_bbox, None)
-                        if fencer_track_id is not None:
-                            logger.info("Frame %d: locked fencer tracker ID %d",
-                                        frame_idx, fencer_track_id)
-
-                    if opponent_bbox is not None and opponent_track_id is None:
-                        opponent_track_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
-                        if opponent_track_id is not None:
-                            logger.info("Frame %d: locked opponent tracker ID %d",
-                                        frame_idx, opponent_track_id)
-
-                    # Use locked IDs to extract keypoints (ignore all others)
+                    # --- Fencer tracking ---
                     if fencer_track_id is not None:
                         kps, conf = _get_kps_by_id(result, fencer_track_id)
                         if kps is not None:
+                            # Locked ID still visible — normal path
                             fencer_pose = _keypoints_to_dict(kps, conf)
+                            fencer_missing_count = 0
+                            fencer_candidate_id = None
+                            fencer_candidate_count = 0
+                        else:
+                            # Locked ID missing (occluded or tracker dropped it)
+                            fencer_missing_count += 1
+                            # After a grace period, look for a new ID in the ROI
+                            if fencer_missing_count >= RELOCK_MIN_WAIT and fencer_bbox is not None:
+                                roi_id = _try_lock_id(result, fencer_bbox, opponent_track_id)
+                                if roi_id is not None:
+                                    # Require the same new ID for RELOCK_CONFIRM frames
+                                    if roi_id == fencer_candidate_id:
+                                        fencer_candidate_count += 1
+                                    else:
+                                        fencer_candidate_id = roi_id
+                                        fencer_candidate_count = 1
+                                    if fencer_candidate_count >= RELOCK_CONFIRM:
+                                        logger.info(
+                                            "Frame %d: re-locked fencer ID %d -> %d "
+                                            "(confirmed %d frames in ROI after %d missing)",
+                                            frame_idx, fencer_track_id, roi_id,
+                                            RELOCK_CONFIRM, fencer_missing_count)
+                                        fencer_track_id = roi_id
+                                        fencer_missing_count = 0
+                                        fencer_candidate_id = None
+                                        fencer_candidate_count = 0
+                                        kps, conf = _get_kps_by_id(result, fencer_track_id)
+                                        if kps is not None:
+                                            fencer_pose = _keypoints_to_dict(kps, conf)
+                                else:
+                                    # Nobody in ROI — occluder still blocking, keep waiting
+                                    fencer_candidate_id = None
+                                    fencer_candidate_count = 0
+                    elif fencer_bbox is not None:
+                        # Initial lock (first frames of video)
+                        fencer_track_id = _try_lock_id(result, fencer_bbox, opponent_track_id)
+                        if fencer_track_id is not None:
+                            logger.info("Frame %d: locked fencer tracker ID %d",
+                                        frame_idx, fencer_track_id)
+                            kps, conf = _get_kps_by_id(result, fencer_track_id)
+                            if kps is not None:
+                                fencer_pose = _keypoints_to_dict(kps, conf)
 
+                    # --- Opponent tracking ---
                     if opponent_track_id is not None:
                         kps, conf = _get_kps_by_id(result, opponent_track_id)
                         if kps is not None:
                             opponent_pose = _keypoints_to_dict(kps, conf)
+                            opponent_missing_count = 0
+                            opponent_candidate_id = None
+                            opponent_candidate_count = 0
+                        else:
+                            opponent_missing_count += 1
+                            if opponent_missing_count >= RELOCK_MIN_WAIT and opponent_bbox is not None:
+                                roi_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
+                                if roi_id is not None:
+                                    if roi_id == opponent_candidate_id:
+                                        opponent_candidate_count += 1
+                                    else:
+                                        opponent_candidate_id = roi_id
+                                        opponent_candidate_count = 1
+                                    if opponent_candidate_count >= RELOCK_CONFIRM:
+                                        logger.info(
+                                            "Frame %d: re-locked opponent ID %d -> %d "
+                                            "(confirmed %d frames in ROI after %d missing)",
+                                            frame_idx, opponent_track_id, roi_id,
+                                            RELOCK_CONFIRM, opponent_missing_count)
+                                        opponent_track_id = roi_id
+                                        opponent_missing_count = 0
+                                        opponent_candidate_id = None
+                                        opponent_candidate_count = 0
+                                        kps, conf = _get_kps_by_id(result, opponent_track_id)
+                                        if kps is not None:
+                                            opponent_pose = _keypoints_to_dict(kps, conf)
+                                else:
+                                    opponent_candidate_id = None
+                                    opponent_candidate_count = 0
+                    elif opponent_bbox is not None:
+                        opponent_track_id = _try_lock_id(result, opponent_bbox, fencer_track_id)
+                        if opponent_track_id is not None:
+                            logger.info("Frame %d: locked opponent tracker ID %d",
+                                        frame_idx, opponent_track_id)
+                            kps, conf = _get_kps_by_id(result, opponent_track_id)
+                            if kps is not None:
+                                opponent_pose = _keypoints_to_dict(kps, conf)
+                    elif fencer_track_id is not None:
+                        # Auto-assign opponent (no bbox drawn): highest-confidence other
+                        opponent_track_id = _best_other_id(result, fencer_track_id)
+                        if opponent_track_id is not None:
+                            logger.info("Frame %d: auto-assigned opponent tracker ID %d",
+                                        frame_idx, opponent_track_id)
+                            kps, conf = _get_kps_by_id(result, opponent_track_id)
+                            if kps is not None:
+                                opponent_pose = _keypoints_to_dict(kps, conf)
 
                 else:
                     # No ROI: fall back to index order (kps[0]=fencer, kps[1]=opponent)

@@ -4,6 +4,7 @@ import Dashboard from '@/pages/Dashboard'
 import ConfigureROI from '@/pages/ConfigureROI'
 import ProcessingStatus from '@/pages/ProcessingStatus'
 import VideoReview from '@/pages/VideoReview'
+import DrillReport from '@/pages/DrillReport'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="/bouts/:boutId/configure" element={<ConfigureROI />} />
           <Route path="/bouts/:boutId/processing" element={<ProcessingStatus />} />
           <Route path="/bouts/:boutId/review" element={<VideoReview />} />
+          <Route path="/bouts/:boutId/drill" element={<DrillReport />} />
         </Route>
       </Routes>
     </BrowserRouter>

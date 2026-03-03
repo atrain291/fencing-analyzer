@@ -52,9 +52,9 @@ async def upload_video(
     video_key = f"{uuid.uuid4()}{ext}"
     dest_path = os.path.join(upload_dir, video_key)
 
-    contents = await file.read()
     with open(dest_path, "wb") as f:
-        f.write(contents)
+        while chunk := await file.read(1024 * 1024):  # 1 MB chunks
+            f.write(chunk)
 
     # Extract thumbnail from first frame
     video_key_no_ext = os.path.splitext(video_key)[0]

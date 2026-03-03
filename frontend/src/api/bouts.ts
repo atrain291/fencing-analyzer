@@ -31,6 +31,24 @@ export interface PipelineProgress {
   cpu_pct?: number
 }
 
+export interface Action {
+  id: number
+  bout_id: number
+  type: string
+  start_ms: number
+  end_ms: number
+  outcome: string | null
+  confidence: number | null
+}
+
+export interface Analysis {
+  id: number
+  bout_id: number
+  coaching_text: string | null
+  patterns: Record<string, any> | null
+  practice_plan: Record<string, any> | null
+}
+
 export interface Bout {
   id: number
   session_id: number
@@ -41,6 +59,8 @@ export interface Bout {
   pipeline_progress: PipelineProgress
   created_at: string
   frames: Frame[]
+  actions: Action[]
+  analysis: Analysis | null
 }
 
 export interface BoutStatus {
@@ -67,6 +87,7 @@ export async function uploadVideo(
   form.append('fencer_id', String(fencerId))
 
   const { data } = await api.post<BoutUploadResponse>('/upload/', form, {
+    timeout: 0,
     onUploadProgress: e => {
       if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
     },
@@ -98,6 +119,28 @@ export interface Bbox {
 
 export function getThumbnailUrl(boutId: number): string {
   return `${api.defaults.baseURL}/bouts/${boutId}/thumbnail`
+}
+
+export interface ActionBreakdownEntry {
+  count: number
+  avg_duration_ms: number
+  consistency_score: number
+}
+
+export interface DrillReport {
+  drill_type: string
+  total_actions: number
+  total_duration_ms: number
+  tempo: number
+  action_breakdown: Record<string, ActionBreakdownEntry>
+  rhythm_score: number
+  tempo_score: number
+  overall_score: number
+}
+
+export async function getDrillReport(boutId: number): Promise<DrillReport> {
+  const { data } = await api.get<DrillReport>(`/bouts/${boutId}/drill-report`)
+  return data
 }
 
 export async function configureROI(
