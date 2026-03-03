@@ -203,7 +203,7 @@ def get_drill_report(bout_id: int, db: Session = Depends(get_db)):
     bout = db.get(Bout, bout_id)
     if not bout:
         raise HTTPException(status_code=404, detail="Bout not found")
-    if bout.status != "done":
+    if bout.status not in ("done", "complete"):
         raise HTTPException(status_code=400, detail="Pipeline has not completed for this bout")
 
     actions = (

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Upload, User, AlertCircle, FileVideo, Clock } from 'lucide-react'
+import { Upload, User, AlertCircle, FileVideo, Clock, Trash2 } from 'lucide-react'
 import { listFencers, createFencer, type Fencer } from '@/api/fencers'
 import { uploadVideo, deleteBout, listBouts, getThumbnailUrl, type BoutSummary } from '@/api/bouts'
 import clsx from 'clsx'
@@ -204,6 +204,36 @@ export default function Dashboard() {
                         '\u2014'
                       )}
                     </div>
+                  </div>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setBouts(prev => prev.filter(b => b.id !== bout.id))
+                      deleteBout(bout.id).catch(() => {
+                        // Re-fetch on failure to restore the list
+                        if (selectedFencer) {
+                          listBouts(selectedFencer).then(setBouts).catch(() => {})
+                        }
+                      })
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.stopPropagation()
+                        e.preventDefault()
+                        setBouts(prev => prev.filter(b => b.id !== bout.id))
+                        deleteBout(bout.id).catch(() => {
+                          if (selectedFencer) {
+                            listBouts(selectedFencer).then(setBouts).catch(() => {})
+                          }
+                        })
+                      }
+                    }}
+                    className="flex-shrink-0 p-2 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                    title="Delete bout"
+                  >
+                    <Trash2 size={16} />
                   </div>
                 </button>
               ))}
