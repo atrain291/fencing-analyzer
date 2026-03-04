@@ -76,9 +76,10 @@ async def upload_video(
     db.commit()
     db.refresh(bout)
 
-    # Auto-trigger skeleton preview
-    from app.tasks import dispatch_preview
+    # Auto-trigger skeleton preview and H.264 transcode
+    from app.tasks import dispatch_preview, dispatch_transcode
     task = dispatch_preview(bout.id, f"/app/uploads/{video_key}")
+    dispatch_transcode(bout.id, f"/app/uploads/{video_key}")
     bout.task_id = task.id
     bout.status = "previewing"
     db.commit()

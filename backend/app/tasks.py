@@ -21,3 +21,12 @@ def dispatch_preview(bout_id: int, video_path: str):
         args=[bout_id, video_path],
         queue="video_pipeline",
     )
+
+
+def dispatch_transcode(bout_id: int, video_path: str):
+    """Dispatch H.264 transcode for browser-compatible playback."""
+    return celery_app.send_task(
+        "worker.tasks.transcode.transcode_for_web",
+        args=[bout_id, video_path],
+        queue="video_pipeline",
+    )
