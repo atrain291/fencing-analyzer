@@ -1,6 +1,6 @@
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import { getBout, deleteBout, Frame, Keypoint, BladeState } from '@/api/bouts'
+import { getBout, getBoutFrames, deleteBout, Frame, Keypoint, BladeState } from '@/api/bouts'
 import { drawSkeleton } from '@/utils/skeleton'
 import { Trash2, Maximize2, Minimize2, GripHorizontal, Activity } from 'lucide-react'
 
@@ -304,10 +304,12 @@ export default function VideoReview() {
     if (!boutId) return
     getBout(Number(boutId)).then((data) => {
       if (data.video_url) setVideoUrl(data.video_url)
-      if ((data as any).analysis) setAnalysis((data as any).analysis)
-      if (data.frames) setFrames(data.frames)
-      if ((data as any).actions) setActions((data as any).actions)
+      if (data.analysis) setAnalysis(data.analysis as unknown as AnalysisSummary)
     })
+    getBoutFrames(Number(boutId)).then((data) => {
+      if (data.frames) setFrames(data.frames)
+      if (data.actions) setActions(data.actions)
+    }).catch(() => { /* frames not yet available */ })
   }, [boutId])
 
   useEffect(() => {

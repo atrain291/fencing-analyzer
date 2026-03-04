@@ -58,9 +58,12 @@ export interface Bout {
   duration_ms: number | null
   pipeline_progress: PipelineProgress
   created_at: string
+  analysis: Analysis | null
+}
+
+export interface BoutFramesResponse {
   frames: Frame[]
   actions: Action[]
-  analysis: Analysis | null
 }
 
 export interface BoutStatus {
@@ -103,6 +106,11 @@ export async function getBoutStatus(boutId: number): Promise<BoutStatus> {
 
 export async function getBout(boutId: number): Promise<Bout> {
   const { data } = await api.get<Bout>(`/bouts/${boutId}`)
+  return data
+}
+
+export async function getBoutFrames(boutId: number): Promise<BoutFramesResponse> {
+  const { data } = await api.get<BoutFramesResponse>(`/bouts/${boutId}/frames`)
   return data
 }
 

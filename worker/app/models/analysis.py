@@ -1,4 +1,6 @@
-from sqlalchemy import String, Integer, Float, Boolean, JSON, ForeignKey
+from datetime import datetime, timezone
+
+from sqlalchemy import String, Integer, Float, Boolean, JSON, ForeignKey, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -67,3 +69,6 @@ class Analysis(Base):
     fatigue_markers: Mapped[dict] = mapped_column(JSON, default=dict)
     llm_summary: Mapped[str | None] = mapped_column(String(8000))
     practice_plan: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

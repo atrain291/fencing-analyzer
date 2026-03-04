@@ -49,17 +49,39 @@ def list_bouts(fencer_id: int, db: Session = Depends(get_db)):
 def get_bout(bout_id: int, db: Session = Depends(get_db)):
     bout = (
         db.query(Bout)
-        .options(
-            joinedload(Bout.frames).joinedload(Frame.blade_state),
-            joinedload(Bout.actions),
-            joinedload(Bout.analysis),
-        )
+        .options(joinedload(Bout.analysis))
         .filter(Bout.id == bout_id)
         .first()
     )
     if not bout:
         raise HTTPException(status_code=404, detail="Bout not found")
     return bout
+
+
+@router.get("/{bout_id}/frames")
+def get_bout_frames(bout_id: int, db: Session = Depends(get_db)):
+    """Return all frames + blade states + actions for overlay rendering."""
+    bout = db.get(Bout, bout_id)
+    if not bout:
+        raise HTTPException(status_code=404, detail="Bout not found")
+    frames = (
+        db.query(Frame)
+        .options(joinedload(Frame.blade_state))
+        .filter(Frame.bout_id == bout_id)
+        .order_by(Frame.timestamp_ms)
+        .all()
+    )
+    actions = (
+        db.query(Action)
+        .filter(Action.bout_id == bout_id)
+        .order_by(Action.start_ms)
+        .all()
+    )
+    from app.schemas.bout import FrameRead, ActionRead
+    return {
+        "frames": [FrameRead.model_validate(f).model_dump() for f in frames],
+        "actions": [ActionRead.model_validate(a).model_dump() for a in actions],
+    }
 
 
 @router.delete("/{bout_id}", status_code=204)

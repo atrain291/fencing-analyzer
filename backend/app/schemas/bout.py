@@ -56,8 +56,6 @@ class BoutRead(BaseModel):
     duration_ms: int | None
     pipeline_progress: dict
     created_at: datetime
-    frames: list[FrameRead] = []
-    actions: list[ActionRead] = []
     analysis: AnalysisRead | None = None
 
 

@@ -93,7 +93,7 @@ def transcode_for_web(self, bout_id: int, video_path: str):
         web_url = f"/uploads/{out_name}"
         with get_db_session() as db:
             from app.models import Bout
-            bout = db.query(Bout).get(bout_id)
+            bout = db.get(Bout, bout_id)
             if bout:
                 bout.video_url = web_url
                 db.commit()
