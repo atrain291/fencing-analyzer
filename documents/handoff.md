@@ -1,58 +1,73 @@
-# Session 6 Handoff — 2026-03-04
+# Session 8 Handoff — 2026-03-05
 
 ## What Was Done
 
-### 1. H.264 Transcode Task (new)
-- **File**: `worker/app/tasks/transcode.py`
-- Auto-dispatched on upload alongside preview task
-- HEVC → H.264 via NVENC GPU (~2s for 30MB video), falls back to libx264
-- Updates `bouts.video_url` to point to `_web.mp4` file
-- **Wiring**: `backend/app/tasks.py` (`dispatch_transcode`), `backend/app/api/routes/upload.py` (auto-dispatch), `worker/app/celery_app.py` (include)
+### Session 7 (2026-03-04)
+- Fixed 4 housekeeping items: dashboard delete cascade, skeleton rendering artifacts, video muted default, corner-drag resize
+- Filtered (0,0) keypoints in skeleton drawing for YOLO11x compatibility
+- Commits: `21172db`, `13d1bc5`
 
-### 2. API Memory Leak Fix (critical)
-- **Root cause**: `GET /api/bouts/{id}` eagerly loaded ALL frames (367+) with pose JSON + blade states via `joinedload()`. Each response was massive, and uvicorn holding connections caused 18GB+ memory usage.
-- **Fix**: Split into two endpoints:
-  - `GET /api/bouts/{id}` — metadata + analysis only (lightweight)
-  - `GET /api/bouts/{id}/frames` — all frames + blade states + actions (heavy, called once by VideoReview)
-- **Files changed**: `backend/app/api/routes/bouts.py`, `backend/app/schemas/bout.py`, `frontend/src/api/bouts.ts`, `frontend/src/pages/VideoReview.tsx`
-
-### 3. Worker Model Sync Fixes
-- `worker/app/models/bout.py` — added missing `video_url` column
-- `worker/app/models/analysis.py` — added missing `created_at` column with `server_default=func.now()`
-- **Note**: Worker and backend have SEPARATE model files. They must be kept in sync.
-
-### 4. DB Schema Fix
-- `analyses.created_at` column exists in Alembic migrations but has no DEFAULT value
-- **Manual fix required after fresh DB**: `ALTER TABLE analyses ALTER COLUMN created_at SET DEFAULT now();`
-- Should be added to Alembic migration or init script for permanence
-
-### 5. Clean Slate
-- DB was wiped (all fencers, bouts, uploads removed)
-- Fresh postgres init + `alembic upgrade head` + manual ALTER TABLE
-- 1 bout (bout #1) processed end-to-end: upload → preview → transcode → skeleton selection → pipeline → review
-- Verified: video plays in Firefox, skeletons render, action timeline works, API stable at ~100MB
-
-## Commits This Session
-```
-60ca600 Fix API memory leak and Firefox video playback
-3248aa9 Add H.264 transcode task for Firefox playback, add CLAUDE.md
-```
+### Session 8 (2026-03-05) — Priority 2 Assessment
+- Evaluated readiness for Priority 2 blade detection refinements
+- No code changes — assessment and planning only
 
 ## Current State
 - **Branch**: `feature/stage-2-blade-detection`
-- **All services running**: 6 containers (frontend, api, worker, postgres, redis, ollama)
-- **API memory**: ~100MB (was 18GB+)
-- **DB**: Fresh, 1 bout processed, `analyses.created_at` DEFAULT manually set
-- **Images**: All 3 rebuilt from scratch this session
+- **Priority 1 COMPLETE** (commit `f9fa740`):
+  - 1a. Persistent weapon arm — determined once from fencer orientation
+  - 1b. EMA temporal smoothing (alpha=0.4) on tip position
+  - 1c. Fixed blade length — calibrated from max arm extension
 
-## Known Remaining Issues
-1. **`analyses.created_at` DEFAULT** not in Alembic migrations — needs a new migration or the ALTER TABLE must be run manually after every fresh DB init
-2. **Playwright MCP** uses Firefox (`--browser firefox` in `.mcp.json`)
-3. **`test_video.mp4`** in project root is a temp file (can be deleted)
+## Priority 2 Assessment Results
 
-## What's Next
-- **P1 Blade Detection Refinement** (see `documents/blade_detection_refinement_plan.md`):
-  - Weapon arm persistence (detect which arm holds weapon)
-  - EMA smoothing on tip position
-  - Fixed blade length constraint
-- These are the next items for Stage 2 completion
+### 2a. Occlusion Bridging via Linear Interpolation
+- **Status**: Not implemented
+- **Scope**: ~100-150 lines in `blade.py`
+- **What**: Buffer last N valid tip positions. If gap < 5 frames (~150ms at 30fps), linearly interpolate. If gap exceeds threshold, emit nothing and reset.
+- **Key detail**: Currently, any keypoint confidence dropout resets ALL EMA state (smooth_x/y, prev values, prev_ts). Occlusion bridging replaces this hard reset with graceful interpolation.
+- **No dependencies**
+
+### 2b. Blade Visibility Confidence Score
+- **Status**: Not implemented
+- **Scope**: DB migration + ~80 lines across worker/backend/frontend
+- **What**: Composite confidence from keypoint conf (40%), temporal consistency (40%), arm extension ratio (20%)
+- **Blocking issue**: `BladeState` model has NO `confidence` column — needs:
+  - New Alembic migration: `ALTER TABLE blade_states ADD COLUMN confidence FLOAT DEFAULT NULL`
+  - Model update in both `worker/app/models/analysis.py` AND `backend/app/models/analysis.py`
+  - Schema update in `backend/app/schemas/bout.py` (BladeStateRead)
+  - Frontend type update in `frontend/src/api/bouts.ts`
+- **Frontend rendering**: `drawBlade()` uses fixed `globalAlpha = 0.85` — change to `0.3 + 0.55 * confidence`
+- **Frontend trail**: `drawTipTrail()` opacity gradient should multiply by confidence
+- **Frontend interpolation**: `interpolateBladeState()` (line 175-186) should also interpolate confidence
+
+### 2c. Action Classification Integration
+- **Status**: Not implemented
+- **Scope**: ~150-200 lines across actions.py, video_pipeline.py, blade.py
+- **What**: Feed blade speed into lunge detection as supplementary signal; compute per-action blade metrics
+- **Key issue**: Pipeline currently runs actions BEFORE blade tracking (actions determines orientation, blade uses it). Integration requires either:
+  - Two-pass: extract orientation first, run blade, then run full action classification with blade data
+  - Or split orientation detection out of actions.py into its own function
+- **actions.py current state**: Purely ankle-based footwork detection (advance, retreat, lunge, step_lunge, check_step, recovery). Sliding window 400ms. Lunge = `dx_front > 0.45 AND abs(dx_back) < 0.15`.
+- **Blade enhancement for lunges**: Real attack = foot extension + blade acceleration forward. Foot-only movement without blade = preparation, not attack.
+- **Optional Action model extension**: `blade_speed_avg`, `blade_speed_peak`, `blade_linearity` columns
+- **Depends on**: 2a (stable blade speed through occlusions)
+
+## Recommended Implementation Order
+1. **2a** (occlusion bridging) — foundational for stable blade speed
+2. **2b** (confidence score) — quick win, improves visual feedback
+3. **2c** (action integration) — highest user value, depends on 2a
+
+## Key Files for Priority 2
+| File | Role |
+|------|------|
+| `worker/app/pipeline/blade.py` | Core blade tracking — 2a and 2b changes here |
+| `worker/app/pipeline/actions.py` | Action classification — 2c changes here |
+| `worker/app/tasks/video_pipeline.py` | Pipeline orchestrator — 2c reordering here |
+| `worker/app/models/analysis.py` | BladeState model — 2b adds confidence column |
+| `backend/app/models/analysis.py` | Mirror BladeState model — 2b adds confidence column |
+| `backend/app/schemas/bout.py` | API schema — 2b exposes confidence |
+| `frontend/src/api/bouts.ts` | Frontend types — 2b adds confidence field |
+| `frontend/src/pages/VideoReview.tsx` | Blade rendering — 2b opacity modulation |
+
+## Previous Session Handoff
+See git history for session 6 notes (commit `bd6d878`).
