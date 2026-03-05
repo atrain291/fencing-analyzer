@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 STAGES = [
     "ingest",
     "pose_estimation",
-    "blade_tracking",
     "action_classification",
+    "blade_tracking",
     # "llm_synthesis",  # disabled — re-enable when LLM coaching is needed
 ]
 
@@ -124,15 +124,17 @@ def run_pipeline(self, bout_id: int, video_path: str):
                       .order_by(Frame.timestamp_ms)
                       .all())
 
-            # Stage 3 — Blade tracking (83%)
-            _update_progress(bout_id, "blade_tracking", 83, db)
-            run_blade_tracking(frames, video_info, db)
-            logger.info("Blade tracking complete")
-
-            # Stage 4 — Action classification (86%)
-            _update_progress(bout_id, "action_classification", 86, db)
+            # Stage 3 — Action classification first (need orientation for blade)
+            _update_progress(bout_id, "action_classification", 83, db)
+            from app.pipeline.actions import _detect_orientation
+            orientation = _detect_orientation(frames)
             action_results = run_action_classification(bout_id, frames, db)
             logger.info("Action classification complete: %d actions", len(action_results))
+
+            # Stage 4 — Blade tracking (86%, uses orientation from actions)
+            _update_progress(bout_id, "blade_tracking", 86, db)
+            run_blade_tracking(frames, video_info, db, orientation=orientation)
+            logger.info("Blade tracking complete")
 
             # Stage 5 — LLM synthesis (DISABLED — skip to complete)
             # To re-enable, uncomment the block below and remove the stub.
