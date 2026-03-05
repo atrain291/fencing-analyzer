@@ -9,6 +9,7 @@ class BladeStateRead(BaseModel):
     nominal_xyz: dict | None
     velocity_xyz: dict
     speed: float | None
+    confidence: float | None = None
 
 
 class FrameRead(BaseModel):

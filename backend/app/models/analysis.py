@@ -46,6 +46,7 @@ class BladeState(Base):
     flex_offset_xyz: Mapped[dict | None] = mapped_column(JSON)
     nominal_xyz: Mapped[dict | None] = mapped_column(JSON)
     correction_cost: Mapped[float | None] = mapped_column(Float)  # 0.0–1.0
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     frame: Mapped["Frame"] = relationship(back_populates="blade_state")
 

@@ -12,6 +12,7 @@ export interface BladeState {
   nominal_xyz: { x: number; y: number; z: number } | null
   velocity_xyz: { x: number; y: number; z: number }
   speed: number | null
+  confidence: number | null
 }
 
 export interface Frame {

@@ -2,7 +2,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { getBout, getBoutFrames, deleteBout, Frame, Keypoint, BladeState } from '@/api/bouts'
 import { drawSkeleton } from '@/utils/skeleton'
-import { Trash2, Maximize2, Minimize2, GripHorizontal, Activity } from 'lucide-react'
+import { Trash2, Maximize2, Minimize2, Activity } from 'lucide-react'
 
 interface AnalysisSummary {
   llm_summary: string
@@ -55,6 +55,7 @@ interface TipTrailPoint {
   x: number
   y: number
   timestamp_ms: number
+  confidence: number
 }
 
 function inBounds(x: number, y: number): boolean {
@@ -75,16 +76,19 @@ function drawBlade(
   // Skip if tip is wildly out of frame (bad geometric projection)
   if (!inBounds(tip.x, tip.y)) return
 
+  const conf = bladeState.confidence ?? 0.85
+  const alpha = 0.3 + 0.55 * conf
+
   ctx.strokeStyle = '#22c55e'
   ctx.lineWidth = 2
-  ctx.globalAlpha = 0.85
+  ctx.globalAlpha = alpha
   ctx.beginPath()
   ctx.moveTo(wrist.x * width, wrist.y * height)
   ctx.lineTo(tip.x * width, tip.y * height)
   ctx.stroke()
 
   ctx.fillStyle = '#22c55e'
-  ctx.globalAlpha = 1.0
+  ctx.globalAlpha = alpha
   ctx.beginPath()
   ctx.arc(tip.x * width, tip.y * height, 5, 0, Math.PI * 2)
   ctx.fill()
@@ -111,8 +115,9 @@ function drawTipTrail(
 
     // Progress from 0 (oldest) to 1 (newest)
     const progress = i / (trail.length - 1)
+    const trailConf = curr.confidence ?? 1.0
 
-    ctx.strokeStyle = `rgba(34, 197, 94, ${progress * 0.9})`
+    ctx.strokeStyle = `rgba(34, 197, 94, ${progress * 0.9 * trailConf})`
     ctx.lineWidth = 1 + progress * 2
     ctx.beginPath()
     ctx.moveTo(prev.x * width, prev.y * height)
@@ -166,6 +171,7 @@ function interpolatePose(
     result[name] = {
       x: ka.x + (kb.x - ka.x) * t,
       y: ka.y + (kb.y - ka.y) * t,
+      z: ka.z + (kb.z - ka.z) * t,
       confidence: Math.min(ka.confidence, kb.confidence),
     }
   }
@@ -173,6 +179,8 @@ function interpolatePose(
 }
 
 function interpolateBladeState(a: BladeState, b: BladeState, t: number): BladeState {
+  const confA = a.confidence ?? 1.0
+  const confB = b.confidence ?? 1.0
   return {
     tip_xyz: {
       x: a.tip_xyz.x + (b.tip_xyz.x - a.tip_xyz.x) * t,
@@ -182,6 +190,7 @@ function interpolateBladeState(a: BladeState, b: BladeState, t: number): BladeSt
     nominal_xyz: a.nominal_xyz,
     velocity_xyz: a.velocity_xyz,
     speed: a.speed,
+    confidence: confA + (confB - confA) * t,
   }
 }
 
@@ -360,7 +369,7 @@ export default function VideoReview() {
       const tip = bladeState.tip_xyz
       if (inBounds(tip.x, tip.y) && (tip.x !== 0 || tip.y !== 0)) {
         const trail = tipTrailRef.current
-        trail.push({ x: tip.x, y: tip.y, timestamp_ms: timeMs })
+        trail.push({ x: tip.x, y: tip.y, timestamp_ms: timeMs, confidence: bladeState.confidence ?? 1.0 })
         if (trail.length > TRAIL_LENGTH) {
           trail.splice(0, trail.length - TRAIL_LENGTH)
         }
@@ -759,6 +768,18 @@ export default function VideoReview() {
                   {liveBladeState?.speed != null ? (
                     <span className={`text-sm font-mono font-medium ${speedColor(liveBladeState.speed)}`}>
                       {liveBladeState.speed.toFixed(1)} m/s
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-500 font-mono">{'\u2014'}</span>
+                  )}
+                </div>
+
+                {/* Blade Confidence */}
+                <div className="flex justify-between items-baseline">
+                  <span className="text-xs text-gray-400">Blade Conf</span>
+                  {liveBladeState?.confidence != null ? (
+                    <span className="text-sm font-mono font-medium text-gray-200">
+                      {Math.round(liveBladeState.confidence * 100)}%
                     </span>
                   ) : (
                     <span className="text-sm text-gray-500 font-mono">{'\u2014'}</span>
