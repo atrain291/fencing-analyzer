@@ -2,72 +2,63 @@
 
 ## What Was Done
 
-### Session 7 (2026-03-04)
-- Fixed 4 housekeeping items: dashboard delete cascade, skeleton rendering artifacts, video muted default, corner-drag resize
-- Filtered (0,0) keypoints in skeleton drawing for YOLO11x compatibility
-- Commits: `21172db`, `13d1bc5`
+### Priority 2a — Occlusion Bridging (COMPLETE)
+- **Commit**: `296b586`
+- Extracted `_compute_raw_tip()` helper from inline keypoint logic
+- Added `_interpolate_gap()` — linearly interpolates tip across buffered gap frames
+- Gaps <= 5 frames (~150ms at 30fps) get bridged with BladeState records written to DB
+- Gaps > 5 frames reset all state (same as before)
+- EMA resumes from last interpolated position to avoid discontinuity
+- Interpolated frames get velocity computed from interpolated positions
 
-### Session 8 (2026-03-05) — Priority 2 Assessment
-- Evaluated readiness for Priority 2 blade detection refinements
-- No code changes — assessment and planning only
+### Priority 2b — Blade Confidence Score (COMPLETE)
+- **Commit**: `296b586`
+- New Alembic migration: `c4d5e6f7a8b9_add_confidence_to_blade_states.py`
+- `confidence` column added to BladeState in both worker and backend models
+- Composite score: keypoint conf (40%) + temporal consistency (40%) + arm extension (20%)
+- Frontend: blade/trail opacity modulates by confidence (0.3-0.85 range)
+- "Blade Conf" percentage readout added to frame data panel
+- `interpolateBladeState()` now interpolates confidence between frames
+- Fixed pre-existing: missing `z` in Keypoint interpolation, unused `GripHorizontal` import
+
+### Deployment Steps Required
+1. Run migration: `alembic upgrade head` (inside api container or with DB access)
+2. Rebuild frontend: `podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/`
+3. Restart services: `podman-compose down && podman-compose up -d --no-build`
+4. Worker picks up blade.py changes via volume mount on restart (no rebuild needed)
+5. Re-process a bout to populate confidence data
 
 ## Current State
 - **Branch**: `feature/stage-2-blade-detection`
-- **Priority 1 COMPLETE** (commit `f9fa740`):
-  - 1a. Persistent weapon arm — determined once from fencer orientation
-  - 1b. EMA temporal smoothing (alpha=0.4) on tip position
-  - 1c. Fixed blade length — calibrated from max arm extension
+- **Migration pending**: `c4d5e6f7a8b9` (confidence column)
+- **Not yet deployed/tested** — code committed but containers not rebuilt
 
-## Priority 2 Assessment Results
+## What's Next — Priority 2c: Action Classification Integration
 
-### 2a. Occlusion Bridging via Linear Interpolation
-- **Status**: Not implemented
-- **Scope**: ~100-150 lines in `blade.py`
-- **What**: Buffer last N valid tip positions. If gap < 5 frames (~150ms at 30fps), linearly interpolate. If gap exceeds threshold, emit nothing and reset.
-- **Key detail**: Currently, any keypoint confidence dropout resets ALL EMA state (smooth_x/y, prev values, prev_ts). Occlusion bridging replaces this hard reset with graceful interpolation.
-- **No dependencies**
+### Overview
+Feed blade speed into action classification as supplementary signal. Currently `actions.py` is purely ankle-based.
 
-### 2b. Blade Visibility Confidence Score
-- **Status**: Not implemented
-- **Scope**: DB migration + ~80 lines across worker/backend/frontend
-- **What**: Composite confidence from keypoint conf (40%), temporal consistency (40%), arm extension ratio (20%)
-- **Blocking issue**: `BladeState` model has NO `confidence` column — needs:
-  - New Alembic migration: `ALTER TABLE blade_states ADD COLUMN confidence FLOAT DEFAULT NULL`
-  - Model update in both `worker/app/models/analysis.py` AND `backend/app/models/analysis.py`
-  - Schema update in `backend/app/schemas/bout.py` (BladeStateRead)
-  - Frontend type update in `frontend/src/api/bouts.ts`
-- **Frontend rendering**: `drawBlade()` uses fixed `globalAlpha = 0.85` — change to `0.3 + 0.55 * confidence`
-- **Frontend trail**: `drawTipTrail()` opacity gradient should multiply by confidence
-- **Frontend interpolation**: `interpolateBladeState()` (line 175-186) should also interpolate confidence
+### Key Design Decision
+Pipeline runs actions BEFORE blade tracking (actions determines orientation for weapon arm). Two options:
+1. **Two-pass**: Extract orientation first (lightweight), run blade tracking, then run full action classification with blade data
+2. **Split `_detect_orientation()`** out of `actions.py` into a shared utility
 
-### 2c. Action Classification Integration
-- **Status**: Not implemented
-- **Scope**: ~150-200 lines across actions.py, video_pipeline.py, blade.py
-- **What**: Feed blade speed into lunge detection as supplementary signal; compute per-action blade metrics
-- **Key issue**: Pipeline currently runs actions BEFORE blade tracking (actions determines orientation, blade uses it). Integration requires either:
-  - Two-pass: extract orientation first, run blade, then run full action classification with blade data
-  - Or split orientation detection out of actions.py into its own function
-- **actions.py current state**: Purely ankle-based footwork detection (advance, retreat, lunge, step_lunge, check_step, recovery). Sliding window 400ms. Lunge = `dx_front > 0.45 AND abs(dx_back) < 0.15`.
-- **Blade enhancement for lunges**: Real attack = foot extension + blade acceleration forward. Foot-only movement without blade = preparation, not attack.
-- **Optional Action model extension**: `blade_speed_avg`, `blade_speed_peak`, `blade_linearity` columns
-- **Depends on**: 2a (stable blade speed through occlusions)
+### Implementation Details
+- **Lunge qualification**: Currently `dx_front > 0.45 AND abs(dx_back) < 0.15`. Enhance with blade speed threshold — real attack has blade accelerating forward, not just feet.
+- **Per-action blade metrics**: `blade_speed_avg`, `blade_speed_peak`, `blade_linearity` (direction consistency)
+- **Attack vs preparation**: Foot movement WITHOUT blade acceleration = preparation, not attack
+- **Files**: `actions.py`, `video_pipeline.py` (reorder stages), optionally extend Action model
 
-## Recommended Implementation Order
-1. **2a** (occlusion bridging) — foundational for stable blade speed
-2. **2b** (confidence score) — quick win, improves visual feedback
-3. **2c** (action integration) — highest user value, depends on 2a
+### Dependencies
+- 2a (occlusion bridging) provides stable blade speed through gaps — DONE
+- Blade speed values from EMA-smoothed positions — DONE
 
-## Key Files for Priority 2
-| File | Role |
-|------|------|
-| `worker/app/pipeline/blade.py` | Core blade tracking — 2a and 2b changes here |
-| `worker/app/pipeline/actions.py` | Action classification — 2c changes here |
-| `worker/app/tasks/video_pipeline.py` | Pipeline orchestrator — 2c reordering here |
-| `worker/app/models/analysis.py` | BladeState model — 2b adds confidence column |
-| `backend/app/models/analysis.py` | Mirror BladeState model — 2b adds confidence column |
-| `backend/app/schemas/bout.py` | API schema — 2b exposes confidence |
-| `frontend/src/api/bouts.ts` | Frontend types — 2b adds confidence field |
-| `frontend/src/pages/VideoReview.tsx` | Blade rendering — 2b opacity modulation |
+## Commits This Session
+```
+296b586 Blade detection Priority 2a+2b: occlusion bridging and confidence score
+606828c Add session 8 handoff: Priority 2 blade detection assessment
+```
 
-## Previous Session Handoff
-See git history for session 6 notes (commit `bd6d878`).
+## Previous Sessions
+- Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)
+- Session 6: API memory leak, H.264 transcode (`60ca600`, `3248aa9`)
