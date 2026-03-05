@@ -32,6 +32,11 @@ export function drawSkeleton(
   height: number,
   color: string,
 ): void {
+  // YOLO11x returns (0,0) for undetected keypoints, sometimes with non-zero
+  // confidence. Treat any keypoint at the exact origin as invalid.
+  const valid = (kp: Keypoint) =>
+    kp.confidence >= CONFIDENCE_THRESHOLD && (kp.x !== 0 || kp.y !== 0)
+
   // Draw edges
   ctx.strokeStyle = color
   ctx.lineWidth = 2
@@ -39,7 +44,7 @@ export function drawSkeleton(
     const p1 = pose[start]
     const p2 = pose[end]
     if (!p1 || !p2) continue
-    if (p1.confidence < CONFIDENCE_THRESHOLD || p2.confidence < CONFIDENCE_THRESHOLD) continue
+    if (!valid(p1) || !valid(p2)) continue
 
     const alpha = Math.min(p1.confidence, p2.confidence)
     ctx.globalAlpha = alpha
@@ -52,7 +57,7 @@ export function drawSkeleton(
   // Draw keypoints
   ctx.globalAlpha = 1
   for (const [_name, kp] of Object.entries(pose)) {
-    if (kp.confidence < CONFIDENCE_THRESHOLD) continue
+    if (!valid(kp)) continue
 
     ctx.globalAlpha = kp.confidence
     ctx.fillStyle = color
