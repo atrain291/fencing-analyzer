@@ -30,9 +30,9 @@ class Frame(Base):
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id"), nullable=True)
 
     bout: Mapped["Bout"] = relationship(back_populates="frames")  # noqa: F821
-    blade_state: Mapped["BladeState | None"] = relationship(back_populates="frame")
-    threat_metrics: Mapped["ThreatMetrics | None"] = relationship(back_populates="frame")
-    kinetic_state: Mapped["KineticState | None"] = relationship(back_populates="frame")
+    blade_state: Mapped["BladeState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
+    threat_metrics: Mapped["ThreatMetrics | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
+    kinetic_state: Mapped["KineticState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
 
 
 class BladeState(Base):

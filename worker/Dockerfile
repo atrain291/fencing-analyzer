@@ -11,8 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install YOLOv8 + other ML deps
+# tensorrt-cu12 must match the CUDA 12.x base image; needed for TensorRT engine inference
 RUN pip install --no-cache-dir \
     ultralytics==8.3.0 \
+    tensorrt-cu12 \
     celery[redis]==5.4.0 \
     redis==5.1.1 \
     sqlalchemy==2.0.35 \

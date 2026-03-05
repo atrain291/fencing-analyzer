@@ -46,6 +46,6 @@ class Bout(Base):
     )
 
     session: Mapped["Session"] = relationship(back_populates="bouts")
-    actions: Mapped[list["Action"]] = relationship(back_populates="bout")  # noqa: F821
-    frames: Mapped[list["Frame"]] = relationship(back_populates="bout")  # noqa: F821
-    analysis: Mapped["Analysis | None"] = relationship(back_populates="bout")  # noqa: F821
+    actions: Mapped[list["Action"]] = relationship(back_populates="bout", cascade="all, delete-orphan")  # noqa: F821
+    frames: Mapped[list["Frame"]] = relationship(back_populates="bout", cascade="all, delete-orphan")  # noqa: F821
+    analysis: Mapped["Analysis | None"] = relationship(back_populates="bout", cascade="all, delete-orphan")  # noqa: F821

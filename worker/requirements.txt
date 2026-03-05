@@ -11,3 +11,4 @@ ffmpeg-python==0.2.0
 # torch
 # torchvision
 # ultralytics (YOLOv8)
+# tensorrt-cu12 — TensorRT runtime for .engine inference (installed in Dockerfile)

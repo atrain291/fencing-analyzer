@@ -34,9 +34,17 @@ uploads/
 *.pt
 *.pth
 *.onnx
+*.engine
 
 # Claude Code
 .claude/settings.local.json
+.claude/worktrees/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Screenshots
+*.png
 
 # IDE
 .vscode/

@@ -1,7 +1,20 @@
-"""Stage 2 — Per-frame pose estimation using YOLOv8-Pose (CUDA)."""
+"""Stage 2 — Per-frame pose estimation using YOLOv8-Pose (CUDA).
+
+Uses a 3-thread pipeline to overlap FFmpeg decoding, YOLO inference, and
+DB writes for better GPU utilization:
+
+  Decode thread ─→ [decode_queue] ─→ Main thread (YOLO + tracking) ─→ [write_queue] ─→ Write thread (DB)
+
+BoT-SORT tracking is sequential by design (frame N depends on frame N-1),
+so inference itself cannot be parallelized.  But we can keep the GPU busy
+by having the next decoded frame ready in the queue while the previous
+frame's DB write happens concurrently.
+"""
 import logging
 import os
 import subprocess
+import threading
+from queue import Queue
 from typing import Any
 
 import numpy as np
@@ -15,11 +28,24 @@ _TRACKER_CFG = os.path.join(os.path.dirname(__file__), "botsort_fencing.yaml")
 
 
 def _get_model():
+    """Load YOLO11x-Pose model, preferring TensorRT engine over PyTorch weights.
+
+    TensorRT engine files are GPU-architecture-specific and must be exported
+    once per machine via `python export_tensorrt.py` inside the worker container.
+    """
     global _model
     if _model is None:
         from ultralytics import YOLO
-        _model = YOLO("yolo11x-pose.pt")  # YOLO11 extra-large: 69.4M params, best accuracy
-        logger.info("YOLO11x-Pose model loaded")
+        engine_path = os.path.join(os.path.dirname(__file__), "..", "..", "yolo11x-pose.engine")
+        if os.path.exists(engine_path):
+            _model = YOLO(engine_path, task="pose")
+            logger.info("YOLO11x-Pose TensorRT engine loaded from %s", engine_path)
+        else:
+            _model = YOLO("yolo11x-pose.pt")
+            logger.info(
+                "YOLO11x-Pose PyTorch model loaded (no TensorRT engine found at %s)",
+                engine_path,
+            )
     return _model
 
 
@@ -137,14 +163,84 @@ def _get_kps_by_id(result, track_id: int):
     return None, None
 
 
+def _frame_decoder(proc, width: int, height: int, frame_bytes: int,
+                    decode_queue: Queue) -> None:
+    """Decode thread: reads raw BGR frames from FFmpeg stdout and enqueues them.
+
+    Runs in a background thread so decoding overlaps with YOLO inference.
+    Puts ``(frame_idx, numpy_array)`` tuples into *decode_queue*.
+    Sends a ``None`` sentinel when the pipe is exhausted or an error occurs.
+    """
+    frame_idx = 0
+    try:
+        while True:
+            raw = proc.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+            decode_queue.put((frame_idx, frame))
+            frame_idx += 1
+    except Exception:
+        logger.exception("Decode thread error")
+    finally:
+        decode_queue.put(None)  # sentinel — main thread will stop reading
+
+
+def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
+    """Write thread: creates Frame ORM objects from dicts and commits in batches.
+
+    Runs in a background thread with its own SQLAlchemy session so DB I/O
+    overlaps with YOLO inference on the main thread.  Receives plain dicts
+    (not ORM objects) to avoid cross-thread session contamination.
+    Stops when it receives a ``None`` sentinel.
+
+    If an error occurs, it is stored in *error_holder* (a shared list) so the
+    main thread can detect and re-raise it after joining.
+    """
+    from app.db import get_db_session
+    from app.models.analysis import Frame
+
+    with get_db_session() as db:
+        count = 0
+        try:
+            while True:
+                item = write_queue.get()
+                if item is None:  # sentinel — main thread is done
+                    break
+                db_frame = Frame(**item)
+                db.add(db_frame)
+                count += 1
+                if count % 300 == 0:
+                    db.commit()
+                    logger.debug("Write thread committed %d frames", count)
+            db.commit()  # final batch
+            logger.debug("Write thread final commit: %d frames total", count)
+        except Exception as exc:
+            logger.exception("Write thread error at frame %d", count)
+            error_holder.append(exc)
+            db.rollback()
+            # Drain remaining items so the main thread's put() won't block
+            while True:
+                try:
+                    remaining = write_queue.get_nowait()
+                    if remaining is None:
+                        break
+                except Exception:
+                    break
+
+
 def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None,
                         fencer_bbox=None, opponent_bbox=None):
     """
     Run YOLOv8-Pose on every frame of the video.
     Persists Frame records to the database and returns a summary list.
+
+    Uses a 3-thread pipeline for better GPU utilization:
+      - Decode thread: FFmpeg stdout -> numpy frames (bounded queue, maxsize=8)
+      - Main thread:   YOLO inference + BoT-SORT tracking (sequential, as required)
+      - Write thread:  Frame dicts -> DB INSERT + batch commit (own session)
     """
     model = _get_model()
-    from app.models.analysis import Frame
 
     results_summary = []
     frame_idx = 0
@@ -181,6 +277,30 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     frame_bytes = width * height * 3
     proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 4)
 
+    # --- Pipeline queues ---
+    # Bounded to limit memory: 8 decoded frames ~= 8 * 1920*1080*3 ~= 47 MB
+    decode_queue: Queue = Queue(maxsize=8)
+    write_queue: Queue = Queue(maxsize=64)
+
+    # Shared list for the write thread to report errors back to the main thread
+    write_errors: list[Exception] = []
+
+    # --- Start background threads ---
+    decode_thread = threading.Thread(
+        target=_frame_decoder,
+        args=(proc, width, height, frame_bytes, decode_queue),
+        name="pose-decode",
+        daemon=True,
+    )
+    write_thread = threading.Thread(
+        target=_db_writer,
+        args=(write_queue, bout_id, write_errors),
+        name="pose-db-writer",
+        daemon=True,
+    )
+    decode_thread.start()
+    write_thread.start()
+
     # Tracker ID locking state (persist across frames)
     fencer_track_id: int | None = None
     opponent_track_id: int | None = None
@@ -209,17 +329,17 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
 
     try:
         while True:
-            raw = proc.stdout.read(frame_bytes)
-            if len(raw) < frame_bytes:
+            item = decode_queue.get()
+            if item is None:  # sentinel from decode thread
                 break
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+            frame_idx_decoded, frame = item
 
-            persist = frame_idx > 0  # False on first frame resets stale tracker/GMC state
+            persist = frame_idx_decoded > 0  # False on first frame resets stale tracker/GMC state
             results = model.track(frame, persist=persist, device="cuda", verbose=False,
-                                  tracker=_TRACKER_CFG)
+                                  imgsz=1280, tracker=_TRACKER_CFG)
             result = results[0]
 
-            timestamp_ms = int((frame_idx / fps) * 1000)
+            timestamp_ms = int((frame_idx_decoded / fps) * 1000)
 
             fencer_pose = {}
             opponent_pose = {}
@@ -270,7 +390,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                         logger.info(
                                             "Frame %d: re-locked fencer ID %d -> %d "
                                             "(after %d missing frames)",
-                                            frame_idx, fencer_track_id, new_id,
+                                            frame_idx_decoded, fencer_track_id, new_id,
                                             fencer_missing_count)
                                         fencer_track_id = new_id
                                         fencer_missing_count = 0
@@ -290,7 +410,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                         fencer_track_id = _try_lock_id(result, fencer_bbox, fencer_exclude)
                         if fencer_track_id is not None:
                             logger.info("Frame %d: locked fencer tracker ID %d",
-                                        frame_idx, fencer_track_id)
+                                        frame_idx_decoded, fencer_track_id)
                             fencer_found = True
                             kps, conf = _get_kps_by_id(result, fencer_track_id)
                             if kps is not None:
@@ -329,7 +449,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                         logger.info(
                                             "Frame %d: re-locked opponent ID %d -> %d "
                                             "(after %d missing frames)",
-                                            frame_idx, opponent_track_id, new_id,
+                                            frame_idx_decoded, opponent_track_id, new_id,
                                             opponent_missing_count)
                                         opponent_track_id = new_id
                                         opponent_missing_count = 0
@@ -349,7 +469,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                         opponent_track_id = _try_lock_id(result, opponent_bbox, opponent_exclude)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: locked opponent tracker ID %d",
-                                        frame_idx, opponent_track_id)
+                                        frame_idx_decoded, opponent_track_id)
                             opponent_found = True
                             kps, conf = _get_kps_by_id(result, opponent_track_id)
                             if kps is not None:
@@ -361,7 +481,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                         opponent_track_id = _best_other_id(result, fencer_track_id)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: auto-assigned opponent tracker ID %d",
-                                        frame_idx, opponent_track_id)
+                                        frame_idx_decoded, opponent_track_id)
                             opponent_found = True
                             kps, conf = _get_kps_by_id(result, opponent_track_id)
                             if kps is not None:
@@ -394,29 +514,45 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                         opponent_pose = keypoints_to_dict(
                             kps_all[1], conf_all[1] if conf_all is not None else None)
 
-            db_frame = Frame(
-                bout_id=bout_id,
-                timestamp_ms=timestamp_ms,
-                fencer_pose=fencer_pose,
-                opponent_pose=opponent_pose if opponent_pose else None,
-            )
-            db.add(db_frame)
+            # Enqueue frame data as a plain dict for the write thread.
+            # The write thread creates Frame ORM objects with its own DB session
+            # to avoid cross-thread SQLAlchemy session usage.
+            frame_data = {
+                "bout_id": bout_id,
+                "timestamp_ms": timestamp_ms,
+                "fencer_pose": fencer_pose,
+                "opponent_pose": opponent_pose if opponent_pose else None,
+            }
+            write_queue.put(frame_data)
 
-            results_summary.append({"frame": frame_idx, "timestamp_ms": timestamp_ms})
-            frame_idx += 1
+            results_summary.append({"frame": frame_idx_decoded, "timestamp_ms": timestamp_ms})
+            frame_idx = frame_idx_decoded + 1
 
             if progress_callback and frame_idx % 100 == 0:
                 progress_callback(frame_idx, total_frames_hint)
 
-            # Commit in batches to avoid huge transactions
-            if frame_idx % 300 == 0:
-                db.commit()
-                logger.debug("Committed %d frames", frame_idx)
     finally:
+        # Signal write thread to finish
+        write_queue.put(None)
+
+        # Wait for the write thread to drain and commit
+        write_thread.join(timeout=120)
+        if write_thread.is_alive():
+            logger.error("Write thread did not finish within 120s timeout")
+
+        # Wait for decode thread (should already be done since we consumed sentinel)
+        decode_thread.join(timeout=10)
+
+        # Clean up FFmpeg process
         proc.stdout.close()
         proc.wait()
 
-    db.commit()
+    # Re-raise any error from the write thread so the pipeline fails properly
+    if write_errors:
+        raise RuntimeError(
+            f"DB write thread failed: {write_errors[0]}"
+        ) from write_errors[0]
+
     logger.info("Pose estimation complete: %d frames persisted", frame_idx)
     return results_summary
 
@@ -436,5 +572,8 @@ def keypoints_to_dict(kps: Any, conf: Any) -> dict:
         if i < len(kps):
             x, y = float(kps[i][0]), float(kps[i][1])
             c = float(conf[i]) if conf is not None and i < len(conf) else 0.0
+            # Skip undetected keypoints (YOLO11x returns 0,0 for missing joints)
+            if c < 0.01 and x == 0.0 and y == 0.0:
+                continue
             result[name] = {"x": x, "y": y, "z": 0.0, "confidence": c}
     return result

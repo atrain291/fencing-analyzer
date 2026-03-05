@@ -116,7 +116,7 @@ def preview_skeletons(self, bout_id: int, video_path: str):
                 cv2.imwrite(image_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
                 # Run pose prediction (not tracking)
-                results = model.predict(frame, device="cuda", verbose=False)
+                results = model.predict(frame, device="cuda", verbose=False, imgsz=1280)
                 result = results[0]
 
                 detections = []

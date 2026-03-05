@@ -57,6 +57,10 @@ interface TipTrailPoint {
   timestamp_ms: number
 }
 
+function inBounds(x: number, y: number): boolean {
+  return x >= -0.05 && x <= 1.05 && y >= -0.05 && y <= 1.05
+}
+
 function drawBlade(
   ctx: CanvasRenderingContext2D,
   pose: Record<string, Keypoint>,
@@ -68,6 +72,9 @@ function drawBlade(
   if (!wrist || wrist.confidence < 0.3) return
 
   const tip = bladeState.tip_xyz
+  // Skip if tip is wildly out of frame (bad geometric projection)
+  if (!inBounds(tip.x, tip.y)) return
+
   ctx.strokeStyle = '#22c55e'
   ctx.lineWidth = 2
   ctx.globalAlpha = 0.85
@@ -95,6 +102,12 @@ function drawTipTrail(
   for (let i = 1; i < trail.length; i++) {
     const prev = trail[i - 1]
     const curr = trail[i]
+
+    // Skip segments with wild jumps (>20% of frame) or out-of-bounds points
+    if (!inBounds(prev.x, prev.y) || !inBounds(curr.x, curr.y)) continue
+    const dx = curr.x - prev.x
+    const dy = curr.y - prev.y
+    if (dx * dx + dy * dy > 0.04) continue  // 0.2^2 = 0.04
 
     // Progress from 0 (oldest) to 1 (newest)
     const progress = i / (trail.length - 1)
@@ -204,10 +217,7 @@ export default function VideoReview() {
   const [scrubberDragging, setScrubberDragging] = useState(false)
   const [scrubberHover, setScrubberHover] = useState(false)
   const [scrubberHoverFraction, setScrubberHoverFraction] = useState(0)
-  const [videoHeight, setVideoHeight] = useState<number | null>(null)
-  const resizeDragging = useRef(false)
-  const resizeStartY = useRef(0)
-  const resizeStartHeight = useRef(0)
+
 
   function handleSpeed(s: number) {
     setSpeed(s)
@@ -260,37 +270,6 @@ export default function VideoReview() {
     }
   }, [scrubberDragging, scrubberSeek, scrubberUpdateHover])
 
-  // Resize handle drag logic
-  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    resizeDragging.current = true
-    resizeStartY.current = e.clientY
-    const container = containerRef.current
-    resizeStartHeight.current = container ? container.getBoundingClientRect().height : 400
-  }, [])
-
-  const onResizeDoubleClick = useCallback(() => {
-    setVideoHeight(null)
-  }, [])
-
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!resizeDragging.current) return
-      const delta = e.clientY - resizeStartY.current
-      const newHeight = Math.max(200, Math.min(window.innerHeight * 0.9, resizeStartHeight.current + delta))
-      setVideoHeight(newHeight)
-    }
-    const onMouseUp = () => {
-      resizeDragging.current = false
-    }
-
-    window.addEventListener('mousemove', onMouseMove)
-    window.addEventListener('mouseup', onMouseUp)
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove)
-      window.removeEventListener('mouseup', onMouseUp)
-    }
-  }, [])
 
   useEffect(() => {
     framesRef.current = frames
@@ -379,7 +358,7 @@ export default function VideoReview() {
 
       // Update tip trajectory trail buffer
       const tip = bladeState.tip_xyz
-      if (tip.x !== 0 || tip.y !== 0) {
+      if (inBounds(tip.x, tip.y) && (tip.x !== 0 || tip.y !== 0)) {
         const trail = tipTrailRef.current
         trail.push({ x: tip.x, y: tip.y, timestamp_ms: timeMs })
         if (trail.length > TRAIL_LENGTH) {
@@ -501,10 +480,15 @@ export default function VideoReview() {
             ref={containerRef}
             className={[
               'relative bg-black rounded-xl overflow-hidden',
-              videoHeight == null ? 'aspect-video' : '',
               isFullscreen ? 'rounded-none' : '',
             ].filter(Boolean).join(' ')}
-            style={videoHeight != null ? { height: `${videoHeight}px` } : undefined}
+            style={{
+              resize: isFullscreen ? 'none' : 'both',
+              aspectRatio: '16 / 9',
+              maxWidth: '100%',
+              minWidth: '320px',
+              minHeight: '180px',
+            }}
           >
             <button
               onClick={toggleFullscreen}
@@ -517,23 +501,13 @@ export default function VideoReview() {
               ref={videoRef}
               src={videoUrl}
               controls
+              muted
               className="w-full h-full object-contain"
             />
             <canvas
               ref={canvasRef}
               className="absolute inset-0 w-full h-full pointer-events-none"
             />
-            {/* Resize handle */}
-            {!isFullscreen && (
-              <div
-                className="absolute bottom-0 left-0 right-0 h-2 cursor-row-resize group z-10 flex items-center justify-center"
-                onMouseDown={onResizeMouseDown}
-                onDoubleClick={onResizeDoubleClick}
-                title="Drag to resize video — double-click to reset"
-              >
-                <div className="w-12 h-1 rounded-full bg-gray-600 group-hover:bg-gray-400 transition-colors" />
-              </div>
-            )}
           </div>
           {/* Custom Scrubber Bar */}
           {videoDurationMs > 0 && (
