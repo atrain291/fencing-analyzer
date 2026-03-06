@@ -13,7 +13,7 @@ services:
     depends_on:
       - api
     networks:
-      - fencing
+      - default
     security_opt:
       - label=disable
       - seccomp=unconfined
@@ -32,7 +32,7 @@ services:
       - postgres
       - redis
     networks:
-      - fencing
+      - default
     security_opt:
       - label=disable
       - seccomp=unconfined
@@ -51,7 +51,7 @@ services:
       - redis
       - ollama
     networks:
-      - fencing
+      - default
     # Podman GPU passthrough via CDI (nvidia-container-toolkit must be configured)
     # Run: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml  (once)
     devices:
@@ -67,22 +67,22 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fencing}
       POSTGRES_DB: ${POSTGRES_DB:-fencing_analyzer}
     volumes:
-      - /mnt/data/fencing-data/postgres:/var/lib/postgresql/data
+      - ${POSTGRES_DATA:-./data/postgres}:/var/lib/postgresql/data
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
-      - fencing
+      - default
     security_opt:
       - label=disable
 
   redis:
     image: docker.io/library/redis:7-alpine
     volumes:
-      - /mnt/data/fencing-data/redis:/data
+      - ${REDIS_DATA:-./data/redis}:/data
     ports:
       - "${REDIS_PORT:-6379}:6379"
     networks:
-      - fencing
+      - default
     security_opt:
       - label=disable
 
@@ -93,7 +93,7 @@ services:
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
     networks:
-      - fencing
+      - default
     devices:
       - nvidia.com/gpu=all
     security_opt:
@@ -102,7 +102,3 @@ services:
 volumes:
   ollama_data:
   uploads:
-
-networks:
-  fencing:
-    driver: bridge
