@@ -32,8 +32,8 @@ export function drawSkeleton(
   height: number,
   color: string,
 ): void {
-  // YOLO11x returns (0,0) for undetected keypoints, sometimes with non-zero
-  // confidence. Treat any keypoint at the exact origin as invalid.
+  // Pose models may return (0,0) for undetected keypoints, sometimes with
+  // non-zero confidence. Treat any keypoint at the exact origin as invalid.
   const valid = (kp: Keypoint) =>
     kp.confidence >= CONFIDENCE_THRESHOLD && (kp.x !== 0 || kp.y !== 0)
 

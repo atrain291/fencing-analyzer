@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Web-based AI coaching platform for **epee fencing**. Fencers upload bout video and get pose estimation skeleton overlays (YOLO11x-Pose via ultralytics), blade tip tracking, action classification, and drill reports. Claude API coaching is implemented but currently disabled in the pipeline.
+Web-based AI coaching platform for **epee fencing**. Fencers upload bout video and get pose estimation skeleton overlays (RTMPose WholeBody via rtmlib), blade tip tracking, action classification, and drill reports. Claude API coaching is implemented but currently disabled in the pipeline.
 
 ## Build & Run Commands
 
@@ -15,6 +15,7 @@ All services run in Podman containers via podman-compose.
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-api backend/
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-worker worker/
+# Worker rebuild required after RTMPose migration (new deps: rtmlib, onnxruntime-gpu)
 
 # Start all services (6 containers: frontend, api, worker, postgres, redis, ollama)
 podman-compose up -d --no-build
@@ -44,7 +45,7 @@ Frontend (React 18 + Vite, :5173)
     ↓ /api proxy (vite.config.ts, 600s timeout)
 Backend API (FastAPI, :8000)
     ↓ Celery dispatch
-Worker (PyTorch + YOLO + FFmpeg, GPU)
+Worker (RTMPose + FFmpeg, GPU)
     ↓ reads/writes
 PostgreSQL 16 + Redis 7
 ```
@@ -70,12 +71,12 @@ Celery worker processing one video at a time (`worker_prefetch_multiplier=1`).
 
 **Pipeline stages** (orchestrated by `tasks/video_pipeline.py`):
 1. **Ingest** — FFprobe metadata extraction
-2. **Pose Estimation** (`pipeline/pose.py`) — YOLO11x-Pose (`yolo11x-pose.pt`) + BoT-SORT tracking with custom ID locking/re-lock logic. Hardware-decoded frames via FFmpeg NVDEC pipe.
+2. **Pose Estimation** (`pipeline/pose.py`) — RTMPose WholeBody (rtmlib, 133 keypoints) with proximity-based person matching and custom ID locking/re-lock logic. Hardware-decoded frames via FFmpeg NVDEC pipe.
 3. **Blade Tracking** (`pipeline/blade.py`) — geometric tip projection from wrist/elbow keypoints
 4. **Action Classification** (`pipeline/actions.py`) — rule-based footwork detection (advance, retreat, lunge, etc.) from ankle velocity thresholds
 5. **LLM Synthesis** (`pipeline/llm.py`) — Claude API coaching (currently disabled, returns stub)
 
-**Preview task** (`tasks/preview.py`): extracts 5 frames with YOLO predict (not track) for skeleton selection UI.
+**Preview task** (`tasks/preview.py`): extracts 5 frames with RTMPose WholeBody for skeleton selection UI.
 
 ### Bout Status Flow
 `configuring` → `previewing` → `preview_ready` → `queued` → `processing` → `complete` / `failed`
@@ -85,11 +86,7 @@ Core: `fencers`, `sessions`, `bouts` (with `preview_data`, `fencer_bbox`, `oppon
 
 ## Key Architectural Details
 
-**Tracker ID locking** (`pose.py`): Initial lock uses YOLO-precise bbox from preview to match tracker ID on first frame. Re-lock after occlusion uses proximity-only search with 3-frame confirmation gate. Tracker IDs don't persist across YOLO sessions — preview and pipeline use separate model instances.
-
-**Custom BoT-SORT config** (`botsort_fencing.yaml`): `track_buffer=90` (3s occlusion resilience), `gmc_method: none` (fixed camera), `with_reid: False` (broken in ultralytics 8.3.0).
-
-**Pose frame 0 fix**: First frame uses `persist=False` to avoid stale BoT-SORT/GMC state (OpenCV lkpyramid error). Preview task must clear tracker callbacks before `model.predict()`.
+**Person matching** (`pose.py`): Proximity-based matching replaces YOLO BoT-SORT tracker IDs. Initial lock uses user-selected ROI bbox from preview. Subsequent frames match by closest center distance to last known position. Re-lock after occlusion uses expanded search with 3-frame confirmation gate.
 
 ## Environment & Platform Gotchas
 

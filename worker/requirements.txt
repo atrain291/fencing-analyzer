@@ -10,5 +10,4 @@ ffmpeg-python==0.2.0
 # PyTorch (CUDA) — installed separately in Dockerfile for correct CUDA version
 # torch
 # torchvision
-# ultralytics (YOLOv8)
-# tensorrt-cu12 — TensorRT runtime for .engine inference (installed in Dockerfile)
+# rtmlib + onnxruntime-gpu — RTMPose WholeBody (installed in Dockerfile)

@@ -3,8 +3,8 @@ Video analysis pipeline — Stage 2.
 
 Pipeline stages (per architecture doc):
   1.  Video ingest & decode          FFmpeg + NVDEC
-  2.  Pose estimation per frame      YOLOv8-Pose (CUDA)
-  3.  Guard / shield detection       YOLOv8 custom (CUDA)       [Stage 2 — heuristic for now]
+  2.  Pose estimation per frame      RTMPose WholeBody (CUDA)
+  3.  Guard / shield detection       Custom model (CUDA)        [Stage 2 — heuristic for now]
   4.  Blade axis inference           Geometric calc             [Stage 2]
   5.  Tip position (nominal)         Projection                 [Stage 2]
   6.  Depth estimation               Depth Anything V2          [Stage 3]

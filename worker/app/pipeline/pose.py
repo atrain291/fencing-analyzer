@@ -1,14 +1,12 @@
-"""Stage 2 — Per-frame pose estimation using YOLOv8-Pose (CUDA).
+"""Stage 2 — Per-frame pose estimation using RTMPose WholeBody (rtmlib).
 
-Uses a 3-thread pipeline to overlap FFmpeg decoding, YOLO inference, and
+Uses a 3-thread pipeline to overlap FFmpeg decoding, pose inference, and
 DB writes for better GPU utilization:
 
-  Decode thread ─→ [decode_queue] ─→ Main thread (YOLO + tracking) ─→ [write_queue] ─→ Write thread (DB)
+  Decode thread -> [decode_queue] -> Main thread (RTMPose + matching) -> [write_queue] -> Write thread (DB)
 
-BoT-SORT tracking is sequential by design (frame N depends on frame N-1),
-so inference itself cannot be parallelized.  But we can keep the GPU busy
-by having the next decoded frame ready in the queue while the previous
-frame's DB write happens concurrently.
+Person matching is proximity-based: each frame, detections are matched to
+the fencer/opponent by closest center distance to last known position.
 """
 import logging
 import os
@@ -25,30 +23,54 @@ logger = logging.getLogger(__name__)
 
 _model = None
 
-# Custom tracker config with increased track_buffer for occlusion resilience
-_TRACKER_CFG = os.path.join(os.path.dirname(__file__), "botsort_fencing.yaml")
-
 
 def _get_model():
-    """Load YOLO11x-Pose model, preferring TensorRT engine over PyTorch weights.
+    """Load RTMPose WholeBody model via rtmlib.
 
-    TensorRT engine files are GPU-architecture-specific and must be exported
-    once per machine via `python export_tensorrt.py` inside the worker container.
+    Uses 'performance' mode (YOLOX-m detector + rtmw-dw-x-l pose) with
+    ONNX Runtime GPU backend for best accuracy.
     """
     global _model
     if _model is None:
-        from ultralytics import YOLO
-        engine_path = os.path.join(os.path.dirname(__file__), "..", "..", "yolo11x-pose.engine")
-        if os.path.exists(engine_path):
-            _model = YOLO(engine_path, task="pose")
-            logger.info("YOLO11x-Pose TensorRT engine loaded from %s", engine_path)
-        else:
-            _model = YOLO("yolo11x-pose.pt")
-            logger.info(
-                "YOLO11x-Pose PyTorch model loaded (no TensorRT engine found at %s)",
-                engine_path,
-            )
+        from rtmlib import Wholebody
+        _model = Wholebody(
+            mode='performance',
+            backend='onnxruntime',
+            device='cuda',
+        )
+        logger.info("RTMPose WholeBody loaded (mode=performance, backend=onnxruntime, device=cuda)")
     return _model
+
+
+def _bbox_from_keypoints(kps: np.ndarray, scores: np.ndarray,
+                         width: int, height: int,
+                         conf_thr: float = 0.3) -> dict | None:
+    """Compute a normalized bounding box from keypoint positions.
+
+    Uses only keypoints with confidence >= conf_thr. Falls back to
+    conf_thr=0.1 if no keypoints pass the primary threshold.
+    Returns dict {x1, y1, x2, y2} in 0-1 range, or None if unusable.
+    """
+    valid = scores >= conf_thr
+    if not valid.any():
+        valid = scores >= 0.1
+    if not valid.any():
+        return None
+    pts = kps[valid]
+    x1, y1 = pts.min(axis=0)
+    x2, y2 = pts.max(axis=0)
+    # Normalize to 0-1
+    return {
+        "x1": float(x1 / width),
+        "y1": float(y1 / height),
+        "x2": float(x2 / width),
+        "y2": float(y2 / height),
+    }
+
+
+def _center_of_bbox(bbox: dict) -> tuple[float, float]:
+    """Return the normalized center (cx, cy) of a bbox dict."""
+    return ((bbox["x1"] + bbox["x2"]) / 2, (bbox["y1"] + bbox["y2"]) / 2)
 
 
 def _center_in_bbox(cx: float, cy: float, bbox: dict) -> bool:
@@ -56,144 +78,101 @@ def _center_in_bbox(cx: float, cy: float, bbox: dict) -> bool:
     return bbox['x1'] <= cx <= bbox['x2'] and bbox['y1'] <= cy <= bbox['y2']
 
 
-def _detection_on_strip(result, idx: int, strip: dict | None) -> bool:
-    """Check if detection at index idx has ankles on the strip."""
+def _detection_on_strip(kps: np.ndarray, scores: np.ndarray,
+                        width: int, height: int,
+                        strip: dict | None) -> bool:
+    """Check if a detection's ankles are on the strip."""
     if not strip or not strip.get("polygon"):
         return True
-    if result.keypoints is None or result.keypoints.conf is None:
-        return True  # can't verify — don't filter
-    kps = result.keypoints.xyn.cpu().numpy()
-    conf = result.keypoints.conf.cpu().numpy()
-    if idx >= len(kps):
-        return True
-    kps_dict = keypoints_to_dict(kps[idx], conf[idx])
+    kps_dict = keypoints_to_dict(kps, scores, width, height)
     return ankles_on_strip(kps_dict, strip)
 
 
-def _try_lock_id(result, bbox: dict, exclude_ids: set[int],
-                 strip: dict | None = None) -> int | None:
+def _dist_sq(cx1: float, cy1: float, cx2: float, cy2: float) -> float:
+    """Squared Euclidean distance between two points."""
+    return (cx1 - cx2) ** 2 + (cy1 - cy2) ** 2
+
+
+# Maximum normalized distance (squared) to accept a detection as the same
+# person across consecutive frames.  0.15^2 = 0.0225 (~15% of frame diagonal).
+_MAX_TRACK_DIST_SQ = 0.0225
+
+
+def _find_in_roi(detections: list[dict], roi_bbox: dict,
+                 exclude_indices: set[int],
+                 strip: dict | None, all_kps: np.ndarray,
+                 all_scores: np.ndarray, width: int, height: int) -> int | None:
+    """Find the detection index whose center is inside the ROI bbox.
+
+    Filters by strip and exclusion set. Returns index or None.
     """
-    Try to lock a tracker ID from the current frame using an ROI bbox.
-    Returns the tracker ID of the first detection whose center falls in bbox
-    AND whose ankles are on the strip, excluding any ID in exclude_ids.
-    Returns None if no match found or tracking IDs unavailable.
-    """
-    if result.boxes is None or result.boxes.id is None:
-        return None
-    track_ids = result.boxes.id.cpu().numpy().astype(int)
-    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
-    for i, tid in enumerate(track_ids):
-        if int(tid) in exclude_ids:
+    for i, det in enumerate(detections):
+        if i in exclude_indices:
             continue
-        if i >= len(boxes_xyxyn):
-            break
-        box = boxes_xyxyn[i]
-        cx = (box[0] + box[2]) / 2
-        cy = (box[1] + box[3]) / 2
-        if _center_in_bbox(cx, cy, bbox) and _detection_on_strip(result, i, strip):
-            return int(tid)
+        cx, cy = det["cx"], det["cy"]
+        if _center_in_bbox(cx, cy, roi_bbox):
+            if _detection_on_strip(all_kps[i], all_scores[i], width, height, strip):
+                return i
     return None
 
 
-def _all_track_ids(result) -> set[int]:
-    """Return the set of all tracker IDs visible in this frame."""
-    if result.boxes is None or result.boxes.id is None:
-        return set()
-    return set(result.boxes.id.cpu().numpy().astype(int).tolist())
+def _find_closest(detections: list[dict], target_cx: float, target_cy: float,
+                  exclude_indices: set[int],
+                  strip: dict | None, all_kps: np.ndarray,
+                  all_scores: np.ndarray, width: int, height: int,
+                  max_dist_sq: float | None = None) -> int | None:
+    """Find the detection index closest to (target_cx, target_cy).
 
-
-def _get_center_by_id(result, track_id: int) -> tuple[float, float] | None:
-    """Return normalized center (cx, cy) for the given tracker ID, or None."""
-    if result.boxes is None or result.boxes.id is None:
-        return None
-    track_ids = result.boxes.id.cpu().numpy().astype(int)
-    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
-    for i, tid in enumerate(track_ids):
-        if tid == track_id and i < len(boxes_xyxyn):
-            box = boxes_xyxyn[i]
-            return (float((box[0] + box[2]) / 2), float((box[1] + box[3]) / 2))
-    return None
-
-
-def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int],
-                          strip: dict | None = None) -> int | None:
-    """Find the tracker ID whose detection center is closest to (cx, cy),
-    excluding any ID in exclude_ids and filtering by strip bounds.
-    Returns None if no candidates."""
-    if result.boxes is None or result.boxes.id is None:
-        return None
-    track_ids = result.boxes.id.cpu().numpy().astype(int)
-    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
-    best_tid = None
+    Filters by strip, exclusion set, and optional max distance.
+    Returns index or None.
+    """
+    best_idx = None
     best_dist = float('inf')
-    for i, tid in enumerate(track_ids):
-        if int(tid) in exclude_ids:
+    for i, det in enumerate(detections):
+        if i in exclude_indices:
             continue
-        if i >= len(boxes_xyxyn):
-            break
-        if not _detection_on_strip(result, i, strip):
+        if not _detection_on_strip(all_kps[i], all_scores[i], width, height, strip):
             continue
-        box = boxes_xyxyn[i]
-        dcx = float((box[0] + box[2]) / 2)
-        dcy = float((box[1] + box[3]) / 2)
-        dist = (dcx - cx) ** 2 + (dcy - cy) ** 2
-        if dist < best_dist:
-            best_dist = dist
-            best_tid = int(tid)
-    return best_tid
+        d = _dist_sq(det["cx"], det["cy"], target_cx, target_cy)
+        if max_dist_sq is not None and d > max_dist_sq:
+            continue
+        if d < best_dist:
+            best_dist = d
+            best_idx = i
+    return best_idx
 
 
-def _best_other_id(result, exclude_id: int, strip: dict | None = None) -> int | None:
+def _find_best_confidence(detections: list[dict], exclude_indices: set[int],
+                          strip: dict | None, all_kps: np.ndarray,
+                          all_scores: np.ndarray,
+                          width: int, height: int) -> int | None:
+    """Find the detection index with highest overall keypoint confidence.
+
+    Filters by strip and exclusion set. Returns index or None.
     """
-    Return the tracker ID of the highest-confidence detection that is NOT exclude_id
-    and whose ankles are on the strip.
-    Used to auto-assign the opponent when no opponent bbox was provided.
-    Returns None if no other detection exists or tracking IDs unavailable.
-    """
-    if result.boxes is None or result.boxes.id is None:
-        return None
-    track_ids = result.boxes.id.cpu().numpy().astype(int)
-    confs = result.boxes.conf.cpu().numpy()
-    best_tid = None
+    best_idx = None
     best_conf = -1.0
-    for i, tid in enumerate(track_ids):
-        if tid == exclude_id:
+    for i, det in enumerate(detections):
+        if i in exclude_indices:
             continue
-        if not _detection_on_strip(result, i, strip):
+        if not _detection_on_strip(all_kps[i], all_scores[i], width, height, strip):
             continue
-        c = float(confs[i]) if i < len(confs) else 0.0
-        if c > best_conf:
-            best_conf = c
-            best_tid = int(tid)
-    return best_tid
-
-
-def _get_kps_by_id(result, track_id: int):
-    """
-    Return (kps_array, conf_array) for the detection with the given tracker ID.
-    Returns (None, None) if the ID is not present in this frame.
-    """
-    if result.boxes is None or result.boxes.id is None:
-        return None, None
-    track_ids = result.boxes.id.cpu().numpy().astype(int)
-    kps_all = result.keypoints.xyn.cpu().numpy()
-    conf_all = (result.keypoints.conf.cpu().numpy()
-                if result.keypoints.conf is not None else None)
-    for i, tid in enumerate(track_ids):
-        if tid == track_id:
-            kps = kps_all[i] if i < len(kps_all) else None
-            conf = conf_all[i] if conf_all is not None and i < len(conf_all) else None
-            return kps, conf
-    return None, None
+        # Mean confidence of body keypoints (first 17)
+        body_scores = all_scores[i][:17]
+        mean_conf = float(body_scores[body_scores > 0.1].mean()) if (body_scores > 0.1).any() else 0.0
+        if mean_conf > best_conf:
+            best_conf = mean_conf
+            best_idx = i
+    return best_idx
 
 
 def _frame_decoder(proc, width: int, height: int, frame_bytes: int,
                     decode_queue: Queue) -> None:
     """Decode thread: reads raw BGR frames from FFmpeg stdout and enqueues them.
 
-    Runs in a background thread so decoding overlaps with YOLO inference.
-    Puts ``(frame_idx, numpy_array)`` tuples into *decode_queue*.
-    Sends a ``None`` sentinel when the pipe is exhausted or an error occurs.
+    Runs in a background thread so decoding overlaps with pose inference.
+    Puts (frame_idx, numpy_array) tuples into *decode_queue*.
+    Sends a None sentinel when the pipe is exhausted or an error occurs.
     """
     frame_idx = 0
     try:
@@ -207,19 +186,16 @@ def _frame_decoder(proc, width: int, height: int, frame_bytes: int,
     except Exception:
         logger.exception("Decode thread error")
     finally:
-        decode_queue.put(None)  # sentinel — main thread will stop reading
+        decode_queue.put(None)  # sentinel
 
 
 def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
     """Write thread: creates Frame ORM objects from dicts and commits in batches.
 
     Runs in a background thread with its own SQLAlchemy session so DB I/O
-    overlaps with YOLO inference on the main thread.  Receives plain dicts
+    overlaps with pose inference on the main thread.  Receives plain dicts
     (not ORM objects) to avoid cross-thread session contamination.
-    Stops when it receives a ``None`` sentinel.
-
-    If an error occurs, it is stored in *error_holder* (a shared list) so the
-    main thread can detect and re-raise it after joining.
+    Stops when it receives a None sentinel.
     """
     from app.db import get_db_session
     from app.models.analysis import Frame
@@ -229,7 +205,7 @@ def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
         try:
             while True:
                 item = write_queue.get()
-                if item is None:  # sentinel — main thread is done
+                if item is None:
                     break
                 db_frame = Frame(**item)
                 db.add(db_frame)
@@ -237,13 +213,12 @@ def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
                 if count % 300 == 0:
                     db.commit()
                     logger.debug("Write thread committed %d frames", count)
-            db.commit()  # final batch
+            db.commit()
             logger.debug("Write thread final commit: %d frames total", count)
         except Exception as exc:
             logger.exception("Write thread error at frame %d", count)
             error_holder.append(exc)
             db.rollback()
-            # Drain remaining items so the main thread's put() won't block
             while True:
                 try:
                     remaining = write_queue.get_nowait()
@@ -256,12 +231,12 @@ def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
 def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None,
                         fencer_bbox=None, opponent_bbox=None, strip=None):
     """
-    Run YOLOv8-Pose on every frame of the video.
+    Run RTMPose WholeBody on every frame of the video.
     Persists Frame records to the database and returns a summary list.
 
     Uses a 3-thread pipeline for better GPU utilization:
       - Decode thread: FFmpeg stdout -> numpy frames (bounded queue, maxsize=8)
-      - Main thread:   YOLO inference + BoT-SORT tracking (sequential, as required)
+      - Main thread:   RTMPose inference + proximity-based matching
       - Write thread:  Frame dicts -> DB INSERT + batch commit (own session)
     """
     model = _get_model()
@@ -302,11 +277,8 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 4)
 
     # --- Pipeline queues ---
-    # Bounded to limit memory: 8 decoded frames ~= 8 * 1920*1080*3 ~= 47 MB
     decode_queue: Queue = Queue(maxsize=8)
     write_queue: Queue = Queue(maxsize=64)
-
-    # Shared list for the write thread to report errors back to the main thread
     write_errors: list[Exception] = []
 
     # --- Start background threads ---
@@ -325,222 +297,218 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     decode_thread.start()
     write_thread.start()
 
-    # Tracker ID locking state (persist across frames)
-    fencer_track_id: int | None = None
-    opponent_track_id: int | None = None
+    # Proximity-based person matching state
     roi_mode = fencer_bbox is not None or opponent_bbox is not None
-
-    # Every tracker ID that is NOT the fencer or opponent.  When re-locking
-    # after occlusion, these IDs are excluded so we don't grab a bystander
-    # who walked through the ROI.
-    known_other_ids: set[int] = set()
-
-    # Confirmation-based re-lock: when the locked ID goes missing, we look for
-    # a new ID in the ROI.  Only switch if the same new ID appears in the ROI
-    # for RELOCK_CONFIRM consecutive frames (filters transient occluders).
-    RELOCK_MIN_WAIT = 15       # don't even start looking for a new ID until this many missing frames
-    RELOCK_CONFIRM = 3         # new candidate must be stable for this many consecutive frames
-    fencer_missing_count = 0
-    fencer_candidate_id: int | None = None
-    fencer_candidate_count = 0
-    fencer_last_cx: float | None = None   # last known normalized center
+    fencer_locked = False
+    opponent_locked = False
+    fencer_last_cx: float | None = None
     fencer_last_cy: float | None = None
-    opponent_missing_count = 0
-    opponent_candidate_id: int | None = None
-    opponent_candidate_count = 0
     opponent_last_cx: float | None = None
     opponent_last_cy: float | None = None
+
+    # Re-lock after occlusion
+    RELOCK_MIN_WAIT = 15
+    RELOCK_CONFIRM = 3
+    fencer_missing_count = 0
+    fencer_candidate_cx: float | None = None
+    fencer_candidate_cy: float | None = None
+    fencer_candidate_count = 0
+    opponent_missing_count = 0
+    opponent_candidate_cx: float | None = None
+    opponent_candidate_cy: float | None = None
+    opponent_candidate_count = 0
 
     try:
         while True:
             item = decode_queue.get()
-            if item is None:  # sentinel from decode thread
+            if item is None:
                 break
             frame_idx_decoded, frame = item
 
-            persist = frame_idx_decoded > 0  # False on first frame resets stale tracker/GMC state
-            results = model.track(frame, persist=persist, device="cuda", verbose=False,
-                                  imgsz=1280, tracker=_TRACKER_CFG)
-            result = results[0]
+            # Run RTMPose WholeBody inference
+            keypoints, scores = model(frame)
+            # keypoints: (N, 133, 2) pixel coords, scores: (N, 133)
 
             timestamp_ms = int((frame_idx_decoded / fps) * 1000)
 
             fencer_pose = {}
             opponent_pose = {}
-            fencer_found = False
-            opponent_found = False
 
-            if result.keypoints is not None and len(result.keypoints) > 0:
+            n_detections = len(keypoints) if keypoints is not None and len(keypoints) > 0 else 0
+
+            if n_detections > 0:
+                # Build detection list with normalized centers
+                detections = []
+                for i in range(n_detections):
+                    bbox = _bbox_from_keypoints(keypoints[i], scores[i], width, height)
+                    if bbox is None:
+                        detections.append({"cx": 0.0, "cy": 0.0, "bbox": None})
+                        continue
+                    cx, cy = _center_of_bbox(bbox)
+                    detections.append({"cx": cx, "cy": cy, "bbox": bbox})
+
                 if roi_mode:
-                    # Collect all visible IDs so we can tag bystanders
-                    frame_ids = _all_track_ids(result)
+                    fencer_idx = None
+                    opponent_idx = None
+                    exclude = set()
 
-                    # Build exclusion sets for each role
-                    fencer_exclude = known_other_ids.copy()
-                    if opponent_track_id is not None:
-                        fencer_exclude.add(opponent_track_id)
-                    opponent_exclude = known_other_ids.copy()
-                    if fencer_track_id is not None:
-                        opponent_exclude.add(fencer_track_id)
+                    # --- Fencer matching ---
+                    if fencer_locked and fencer_last_cx is not None:
+                        # Try to find detection close to last known position
+                        fencer_idx = _find_closest(
+                            detections, fencer_last_cx, fencer_last_cy,
+                            exclude, strip, keypoints, scores, width, height,
+                            max_dist_sq=_MAX_TRACK_DIST_SQ)
 
-                    # --- Fencer tracking ---
-                    if fencer_track_id is not None:
-                        kps, conf = _get_kps_by_id(result, fencer_track_id)
-                        if kps is not None:
-                            fencer_pose = keypoints_to_dict(kps, conf)
-                            fencer_found = True
+                        if fencer_idx is not None:
                             fencer_missing_count = 0
-                            fencer_candidate_id = None
+                            fencer_candidate_cx = None
                             fencer_candidate_count = 0
-                            # Track last known position for proximity re-lock
-                            center = _get_center_by_id(result, fencer_track_id)
-                            if center:
-                                fencer_last_cx, fencer_last_cy = center
+                            fencer_last_cx = detections[fencer_idx]["cx"]
+                            fencer_last_cy = detections[fencer_idx]["cy"]
+                            fencer_pose = keypoints_to_dict(
+                                keypoints[fencer_idx], scores[fencer_idx], width, height)
+                            exclude.add(fencer_idx)
                         else:
+                            # Fencer not found near last position
                             fencer_missing_count += 1
                             if fencer_missing_count >= RELOCK_MIN_WAIT:
-                                # Proximity to last known position
-                                new_id = None
-                                if fencer_last_cx is not None:
-                                    new_id = _closest_id_excluding(
-                                        result, fencer_last_cx, fencer_last_cy, fencer_exclude, strip)
-                                if new_id is not None:
-                                    if new_id == fencer_candidate_id:
+                                # Expand search: find closest on-strip detection
+                                candidate_idx = _find_closest(
+                                    detections, fencer_last_cx, fencer_last_cy,
+                                    exclude, strip, keypoints, scores, width, height)
+                                if candidate_idx is not None:
+                                    ccx = detections[candidate_idx]["cx"]
+                                    ccy = detections[candidate_idx]["cy"]
+                                    # Check if candidate is near previous candidate
+                                    if (fencer_candidate_cx is not None
+                                            and _dist_sq(ccx, ccy,
+                                                         fencer_candidate_cx,
+                                                         fencer_candidate_cy) < 0.01):
                                         fencer_candidate_count += 1
                                     else:
-                                        fencer_candidate_id = new_id
+                                        fencer_candidate_cx = ccx
+                                        fencer_candidate_cy = ccy
                                         fencer_candidate_count = 1
                                     if fencer_candidate_count >= RELOCK_CONFIRM:
                                         logger.info(
-                                            "Frame %d: re-locked fencer ID %d -> %d "
-                                            "(after %d missing frames)",
-                                            frame_idx_decoded, fencer_track_id, new_id,
-                                            fencer_missing_count)
-                                        fencer_track_id = new_id
+                                            "Frame %d: re-locked fencer (after %d missing frames)",
+                                            frame_idx_decoded, fencer_missing_count)
+                                        fencer_idx = candidate_idx
+                                        fencer_last_cx = ccx
+                                        fencer_last_cy = ccy
                                         fencer_missing_count = 0
-                                        fencer_candidate_id = None
+                                        fencer_candidate_cx = None
                                         fencer_candidate_count = 0
-                                        kps, conf = _get_kps_by_id(result, fencer_track_id)
-                                        if kps is not None:
-                                            fencer_pose = keypoints_to_dict(kps, conf)
-                                            fencer_found = True
-                                            center = _get_center_by_id(result, fencer_track_id)
-                                            if center:
-                                                fencer_last_cx, fencer_last_cy = center
+                                        fencer_pose = keypoints_to_dict(
+                                            keypoints[fencer_idx], scores[fencer_idx],
+                                            width, height)
+                                        exclude.add(fencer_idx)
                                 else:
-                                    fencer_candidate_id = None
+                                    fencer_candidate_cx = None
                                     fencer_candidate_count = 0
-                    elif fencer_bbox is not None:
-                        fencer_track_id = _try_lock_id(result, fencer_bbox, fencer_exclude, strip)
-                        if fencer_track_id is not None:
-                            logger.info("Frame %d: locked fencer tracker ID %d",
-                                        frame_idx_decoded, fencer_track_id)
-                            fencer_found = True
-                            kps, conf = _get_kps_by_id(result, fencer_track_id)
-                            if kps is not None:
-                                fencer_pose = keypoints_to_dict(kps, conf)
-                            center = _get_center_by_id(result, fencer_track_id)
-                            if center:
-                                fencer_last_cx, fencer_last_cy = center
 
-                    # --- Opponent tracking ---
-                    if opponent_track_id is not None:
-                        kps, conf = _get_kps_by_id(result, opponent_track_id)
-                        if kps is not None:
-                            opponent_pose = keypoints_to_dict(kps, conf)
-                            opponent_found = True
+                    elif fencer_bbox is not None:
+                        # Initial lock: find detection in user-selected ROI
+                        fencer_idx = _find_in_roi(
+                            detections, fencer_bbox, exclude, strip,
+                            keypoints, scores, width, height)
+                        if fencer_idx is not None:
+                            logger.info("Frame %d: locked fencer", frame_idx_decoded)
+                            fencer_locked = True
+                            fencer_last_cx = detections[fencer_idx]["cx"]
+                            fencer_last_cy = detections[fencer_idx]["cy"]
+                            fencer_pose = keypoints_to_dict(
+                                keypoints[fencer_idx], scores[fencer_idx], width, height)
+                            exclude.add(fencer_idx)
+
+                    # --- Opponent matching ---
+                    if opponent_locked and opponent_last_cx is not None:
+                        opponent_idx = _find_closest(
+                            detections, opponent_last_cx, opponent_last_cy,
+                            exclude, strip, keypoints, scores, width, height,
+                            max_dist_sq=_MAX_TRACK_DIST_SQ)
+
+                        if opponent_idx is not None:
                             opponent_missing_count = 0
-                            opponent_candidate_id = None
+                            opponent_candidate_cx = None
                             opponent_candidate_count = 0
-                            center = _get_center_by_id(result, opponent_track_id)
-                            if center:
-                                opponent_last_cx, opponent_last_cy = center
+                            opponent_last_cx = detections[opponent_idx]["cx"]
+                            opponent_last_cy = detections[opponent_idx]["cy"]
+                            opponent_pose = keypoints_to_dict(
+                                keypoints[opponent_idx], scores[opponent_idx],
+                                width, height)
                         else:
                             opponent_missing_count += 1
                             if opponent_missing_count >= RELOCK_MIN_WAIT:
-                                # Proximity to last known position
-                                new_id = None
-                                if opponent_last_cx is not None:
-                                    new_id = _closest_id_excluding(
-                                        result, opponent_last_cx, opponent_last_cy, opponent_exclude, strip)
-                                if new_id is not None:
-                                    if new_id == opponent_candidate_id:
+                                candidate_idx = _find_closest(
+                                    detections, opponent_last_cx, opponent_last_cy,
+                                    exclude, strip, keypoints, scores, width, height)
+                                if candidate_idx is not None:
+                                    ccx = detections[candidate_idx]["cx"]
+                                    ccy = detections[candidate_idx]["cy"]
+                                    if (opponent_candidate_cx is not None
+                                            and _dist_sq(ccx, ccy,
+                                                         opponent_candidate_cx,
+                                                         opponent_candidate_cy) < 0.01):
                                         opponent_candidate_count += 1
                                     else:
-                                        opponent_candidate_id = new_id
+                                        opponent_candidate_cx = ccx
+                                        opponent_candidate_cy = ccy
                                         opponent_candidate_count = 1
                                     if opponent_candidate_count >= RELOCK_CONFIRM:
                                         logger.info(
-                                            "Frame %d: re-locked opponent ID %d -> %d "
-                                            "(after %d missing frames)",
-                                            frame_idx_decoded, opponent_track_id, new_id,
-                                            opponent_missing_count)
-                                        opponent_track_id = new_id
+                                            "Frame %d: re-locked opponent (after %d missing frames)",
+                                            frame_idx_decoded, opponent_missing_count)
+                                        opponent_idx = candidate_idx
+                                        opponent_last_cx = ccx
+                                        opponent_last_cy = ccy
                                         opponent_missing_count = 0
-                                        opponent_candidate_id = None
+                                        opponent_candidate_cx = None
                                         opponent_candidate_count = 0
-                                        kps, conf = _get_kps_by_id(result, opponent_track_id)
-                                        if kps is not None:
-                                            opponent_pose = keypoints_to_dict(kps, conf)
-                                            opponent_found = True
-                                            center = _get_center_by_id(result, opponent_track_id)
-                                            if center:
-                                                opponent_last_cx, opponent_last_cy = center
+                                        opponent_pose = keypoints_to_dict(
+                                            keypoints[opponent_idx], scores[opponent_idx],
+                                            width, height)
                                 else:
-                                    opponent_candidate_id = None
+                                    opponent_candidate_cx = None
                                     opponent_candidate_count = 0
-                    elif opponent_bbox is not None:
-                        opponent_track_id = _try_lock_id(result, opponent_bbox, opponent_exclude, strip)
-                        if opponent_track_id is not None:
-                            logger.info("Frame %d: locked opponent tracker ID %d",
-                                        frame_idx_decoded, opponent_track_id)
-                            opponent_found = True
-                            kps, conf = _get_kps_by_id(result, opponent_track_id)
-                            if kps is not None:
-                                opponent_pose = keypoints_to_dict(kps, conf)
-                            center = _get_center_by_id(result, opponent_track_id)
-                            if center:
-                                opponent_last_cx, opponent_last_cy = center
-                    elif fencer_track_id is not None:
-                        opponent_track_id = _best_other_id(result, fencer_track_id, strip)
-                        if opponent_track_id is not None:
-                            logger.info("Frame %d: auto-assigned opponent tracker ID %d",
-                                        frame_idx_decoded, opponent_track_id)
-                            opponent_found = True
-                            kps, conf = _get_kps_by_id(result, opponent_track_id)
-                            if kps is not None:
-                                opponent_pose = keypoints_to_dict(kps, conf)
-                            center = _get_center_by_id(result, opponent_track_id)
-                            if center:
-                                opponent_last_cx, opponent_last_cy = center
 
-                    # Tag bystanders ONLY when both fencer and opponent are
-                    # positively identified in this frame.  If either is
-                    # missing, a new tracker ID might belong to the missing
-                    # person (tracker ID re-assignment after occlusion).
-                    # Also never tag current re-lock candidates as bystanders.
-                    if fencer_found and opponent_found:
-                        protected = {fencer_track_id, opponent_track_id,
-                                     fencer_candidate_id, opponent_candidate_id}
-                        for tid in frame_ids:
-                            if tid not in protected:
-                                known_other_ids.add(tid)
+                    elif opponent_bbox is not None:
+                        opponent_idx = _find_in_roi(
+                            detections, opponent_bbox, exclude, strip,
+                            keypoints, scores, width, height)
+                        if opponent_idx is not None:
+                            logger.info("Frame %d: locked opponent", frame_idx_decoded)
+                            opponent_locked = True
+                            opponent_last_cx = detections[opponent_idx]["cx"]
+                            opponent_last_cy = detections[opponent_idx]["cy"]
+                            opponent_pose = keypoints_to_dict(
+                                keypoints[opponent_idx], scores[opponent_idx],
+                                width, height)
+
+                    elif fencer_locked:
+                        # Auto-assign opponent: highest confidence on-strip detection
+                        opponent_idx = _find_best_confidence(
+                            detections, exclude, strip, keypoints, scores, width, height)
+                        if opponent_idx is not None:
+                            logger.info("Frame %d: auto-assigned opponent", frame_idx_decoded)
+                            opponent_locked = True
+                            opponent_last_cx = detections[opponent_idx]["cx"]
+                            opponent_last_cy = detections[opponent_idx]["cy"]
+                            opponent_pose = keypoints_to_dict(
+                                keypoints[opponent_idx], scores[opponent_idx],
+                                width, height)
 
                 else:
-                    # No ROI: fall back to index order (kps[0]=fencer, kps[1]=opponent)
-                    kps_all = result.keypoints.xyn.cpu().numpy()
-                    conf_all = (result.keypoints.conf.cpu().numpy()
-                                if result.keypoints.conf is not None else None)
-                    if len(kps_all) >= 1:
+                    # No ROI: fall back to index order (0=fencer, 1=opponent)
+                    if n_detections >= 1:
                         fencer_pose = keypoints_to_dict(
-                            kps_all[0], conf_all[0] if conf_all is not None else None)
-                    if len(kps_all) >= 2:
+                            keypoints[0], scores[0], width, height)
+                    if n_detections >= 2:
                         opponent_pose = keypoints_to_dict(
-                            kps_all[1], conf_all[1] if conf_all is not None else None)
+                            keypoints[1], scores[1], width, height)
 
-            # Enqueue frame data as a plain dict for the write thread.
-            # The write thread creates Frame ORM objects with its own DB session
-            # to avoid cross-thread SQLAlchemy session usage.
+            # Enqueue frame data for the write thread
             frame_data = {
                 "bout_id": bout_id,
                 "timestamp_ms": timestamp_ms,
@@ -556,22 +524,14 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                 progress_callback(frame_idx, total_frames_hint)
 
     finally:
-        # Signal write thread to finish
         write_queue.put(None)
-
-        # Wait for the write thread to drain and commit
         write_thread.join(timeout=120)
         if write_thread.is_alive():
             logger.error("Write thread did not finish within 120s timeout")
-
-        # Wait for decode thread (should already be done since we consumed sentinel)
         decode_thread.join(timeout=10)
-
-        # Clean up FFmpeg process
         proc.stdout.close()
         proc.wait()
 
-    # Re-raise any error from the write thread so the pipeline fails properly
     if write_errors:
         raise RuntimeError(
             f"DB write thread failed: {write_errors[0]}"
@@ -581,7 +541,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     return results_summary
 
 
-# COCO keypoint indices (YOLOv8-Pose uses COCO 17-point skeleton)
+# COCO keypoint indices (RTMPose WholeBody first 17 = COCO 17-point skeleton)
 KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -590,13 +550,23 @@ KEYPOINT_NAMES = [
 ]
 
 
-def keypoints_to_dict(kps: Any, conf: Any) -> dict:
+def keypoints_to_dict(kps: Any, scores: Any,
+                      width: int = 1, height: int = 1) -> dict:
+    """Convert keypoint arrays to a dict of named joints.
+
+    kps: (133, 2) pixel coordinates from rtmlib
+    scores: (133,) confidence values
+    width/height: frame dimensions for normalization (pixel -> 0-1)
+
+    Only the first 17 keypoints (COCO body) are stored.
+    """
     result = {}
     for i, name in enumerate(KEYPOINT_NAMES):
         if i < len(kps):
-            x, y = float(kps[i][0]), float(kps[i][1])
-            c = float(conf[i]) if conf is not None and i < len(conf) else 0.0
-            # Skip undetected keypoints (YOLO11x returns 0,0 for missing joints)
+            x = float(kps[i][0] / width) if width > 1 else float(kps[i][0])
+            y = float(kps[i][1] / height) if height > 1 else float(kps[i][1])
+            c = float(scores[i]) if scores is not None and i < len(scores) else 0.0
+            # Skip undetected keypoints
             if c < 0.01 and x == 0.0 and y == 0.0:
                 continue
             result[name] = {"x": x, "y": y, "z": 0.0, "confidence": c}

@@ -2,9 +2,9 @@
 Preview skeleton extraction task.
 
 Extracts a handful of frames from the first few seconds of a video,
-runs YOLO pose detection (predict, not track), and saves annotated
-preview data so the frontend can show detected skeletons for the user
-to assign fencer / opponent roles before the full pipeline runs.
+runs RTMPose WholeBody pose detection, and saves annotated preview data
+so the frontend can show detected skeletons for the user to assign
+fencer / opponent roles before the full pipeline runs.
 """
 import logging
 import os
@@ -16,7 +16,7 @@ import numpy as np
 from app.celery_app import celery_app
 from app.db import get_db_session
 from app.pipeline.ingest import ingest_video
-from app.pipeline.pose import _get_model, keypoints_to_dict
+from app.pipeline.pose import _get_model, keypoints_to_dict, _bbox_from_keypoints
 from app.pipeline.strip import detect_strip
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def _extract_frame(video_path: str, timestamp_s: float, width: int, height: int)
 @celery_app.task(name="worker.tasks.preview.preview_skeletons", bind=True)
 def preview_skeletons(self, bout_id: int, video_path: str):
     """
-    Extract preview frames and run YOLO pose detection.
+    Extract preview frames and run RTMPose WholeBody pose detection.
 
     Saves JPEG images and a structured preview_data dict on the Bout record
     so the frontend can render skeleton overlays for fencer/opponent selection.
@@ -97,16 +97,8 @@ def preview_skeletons(self, bout_id: int, video_path: str):
             if not frames_bgr:
                 raise RuntimeError("Could not extract any preview frames from video")
 
-            # Stage 3: Run YOLO predict on each frame
+            # Stage 3: Run RTMPose WholeBody on each frame
             model = _get_model()
-            # Clear stale tracker callbacks left by prior .track() calls
-            # (ultralytics attaches on_predict_postprocess_end which invokes
-            #  BoT-SORT GMC even during .predict(), causing lkpyramid errors
-            #  when frame resolution changes between bouts)
-            if hasattr(model, "predictor") and model.predictor is not None:
-                cb = model.predictor.callbacks.get("on_predict_postprocess_end")
-                if cb:
-                    cb.clear()
             os.makedirs(PREVIEW_DIR, exist_ok=True)
 
             preview_frames = []
@@ -116,51 +108,36 @@ def preview_skeletons(self, bout_id: int, video_path: str):
                 image_path = os.path.join("/app/uploads", image_key)
                 cv2.imwrite(image_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-                # Run pose prediction (not tracking)
-                results = model.predict(frame, device="cuda", verbose=False, imgsz=1280)
-                result = results[0]
+                # Run pose detection
+                all_kps, all_scores = model(frame)
+                # all_kps: (N, 133, 2) pixel coords, all_scores: (N, 133)
 
                 detections = []
-                if (
-                    result.boxes is not None
-                    and len(result.boxes) > 0
-                    and result.keypoints is not None
-                ):
-                    boxes_xyxyn = result.boxes.xyxyn.cpu().numpy()
-                    boxes_conf = result.boxes.conf.cpu().numpy()
-                    boxes_cls = result.boxes.cls.cpu().numpy()
-                    kps_all = result.keypoints.xyn.cpu().numpy()
-                    conf_all = (
-                        result.keypoints.conf.cpu().numpy()
-                        if result.keypoints.conf is not None
-                        else None
-                    )
+                n_dets = len(all_kps) if all_kps is not None and len(all_kps) > 0 else 0
 
-                    for j in range(len(result.boxes)):
-                        # Filter: only person class (0) with sufficient confidence
-                        cls_id = int(boxes_cls[j])
-                        confidence = float(boxes_conf[j])
-                        if cls_id != 0 or confidence < MIN_CONFIDENCE:
-                            continue
+                for j in range(n_dets):
+                    kps = all_kps[j]
+                    sc = all_scores[j]
 
-                        box = boxes_xyxyn[j]
-                        bbox = {
-                            "x1": float(box[0]),
-                            "y1": float(box[1]),
-                            "x2": float(box[2]),
-                            "y2": float(box[3]),
-                        }
+                    # Filter by mean body keypoint confidence
+                    body_scores = sc[:17]
+                    mean_conf = float(body_scores[body_scores > 0.1].mean()) \
+                        if (body_scores > 0.1).any() else 0.0
+                    if mean_conf < MIN_CONFIDENCE:
+                        continue
 
-                        kps = kps_all[j] if j < len(kps_all) else None
-                        conf = conf_all[j] if conf_all is not None and j < len(conf_all) else None
-                        keypoints = keypoints_to_dict(kps, conf) if kps is not None else {}
+                    bbox = _bbox_from_keypoints(kps, sc, width, height)
+                    if bbox is None:
+                        continue
 
-                        detections.append({
-                            "index": j,
-                            "bbox": bbox,
-                            "confidence": confidence,
-                            "keypoints": keypoints,
-                        })
+                    keypoints = keypoints_to_dict(kps, sc, width, height)
+
+                    detections.append({
+                        "index": j,
+                        "bbox": bbox,
+                        "confidence": mean_conf,
+                        "keypoints": keypoints,
+                    })
 
                 preview_frames.append({
                     "frame_index": i,
