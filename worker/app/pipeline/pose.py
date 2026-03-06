@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 
+from app.pipeline.strip import ankles_on_strip
+
 logger = logging.getLogger(__name__)
 
 _model = None
@@ -54,11 +56,26 @@ def _center_in_bbox(cx: float, cy: float, bbox: dict) -> bool:
     return bbox['x1'] <= cx <= bbox['x2'] and bbox['y1'] <= cy <= bbox['y2']
 
 
-def _try_lock_id(result, bbox: dict, exclude_ids: set[int]) -> int | None:
+def _detection_on_strip(result, idx: int, strip: dict | None) -> bool:
+    """Check if detection at index idx has ankles on the strip."""
+    if not strip or not strip.get("polygon"):
+        return True
+    if result.keypoints is None or result.keypoints.conf is None:
+        return True  # can't verify — don't filter
+    kps = result.keypoints.xyn.cpu().numpy()
+    conf = result.keypoints.conf.cpu().numpy()
+    if idx >= len(kps):
+        return True
+    kps_dict = keypoints_to_dict(kps[idx], conf[idx])
+    return ankles_on_strip(kps_dict, strip)
+
+
+def _try_lock_id(result, bbox: dict, exclude_ids: set[int],
+                 strip: dict | None = None) -> int | None:
     """
     Try to lock a tracker ID from the current frame using an ROI bbox.
-    Returns the tracker ID of the first detection whose center falls in bbox,
-    excluding any ID in exclude_ids (partner ID + known bystanders).
+    Returns the tracker ID of the first detection whose center falls in bbox
+    AND whose ankles are on the strip, excluding any ID in exclude_ids.
     Returns None if no match found or tracking IDs unavailable.
     """
     if result.boxes is None or result.boxes.id is None:
@@ -73,7 +90,7 @@ def _try_lock_id(result, bbox: dict, exclude_ids: set[int]) -> int | None:
         box = boxes_xyxyn[i]
         cx = (box[0] + box[2]) / 2
         cy = (box[1] + box[3]) / 2
-        if _center_in_bbox(cx, cy, bbox):
+        if _center_in_bbox(cx, cy, bbox) and _detection_on_strip(result, i, strip):
             return int(tid)
     return None
 
@@ -98,9 +115,11 @@ def _get_center_by_id(result, track_id: int) -> tuple[float, float] | None:
     return None
 
 
-def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int]) -> int | None:
+def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int],
+                          strip: dict | None = None) -> int | None:
     """Find the tracker ID whose detection center is closest to (cx, cy),
-    excluding any ID in exclude_ids. Returns None if no candidates."""
+    excluding any ID in exclude_ids and filtering by strip bounds.
+    Returns None if no candidates."""
     if result.boxes is None or result.boxes.id is None:
         return None
     track_ids = result.boxes.id.cpu().numpy().astype(int)
@@ -112,6 +131,8 @@ def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int]) -
             continue
         if i >= len(boxes_xyxyn):
             break
+        if not _detection_on_strip(result, i, strip):
+            continue
         box = boxes_xyxyn[i]
         dcx = float((box[0] + box[2]) / 2)
         dcy = float((box[1] + box[3]) / 2)
@@ -122,9 +143,10 @@ def _closest_id_excluding(result, cx: float, cy: float, exclude_ids: set[int]) -
     return best_tid
 
 
-def _best_other_id(result, exclude_id: int) -> int | None:
+def _best_other_id(result, exclude_id: int, strip: dict | None = None) -> int | None:
     """
-    Return the tracker ID of the highest-confidence detection that is NOT exclude_id.
+    Return the tracker ID of the highest-confidence detection that is NOT exclude_id
+    and whose ankles are on the strip.
     Used to auto-assign the opponent when no opponent bbox was provided.
     Returns None if no other detection exists or tracking IDs unavailable.
     """
@@ -136,6 +158,8 @@ def _best_other_id(result, exclude_id: int) -> int | None:
     best_conf = -1.0
     for i, tid in enumerate(track_ids):
         if tid == exclude_id:
+            continue
+        if not _detection_on_strip(result, i, strip):
             continue
         c = float(confs[i]) if i < len(confs) else 0.0
         if c > best_conf:
@@ -230,7 +254,7 @@ def _db_writer(write_queue: Queue, bout_id: int, error_holder: list) -> None:
 
 
 def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=None,
-                        fencer_bbox=None, opponent_bbox=None):
+                        fencer_bbox=None, opponent_bbox=None, strip=None):
     """
     Run YOLOv8-Pose on every frame of the video.
     Persists Frame records to the database and returns a summary list.
@@ -379,7 +403,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                 new_id = None
                                 if fencer_last_cx is not None:
                                     new_id = _closest_id_excluding(
-                                        result, fencer_last_cx, fencer_last_cy, fencer_exclude)
+                                        result, fencer_last_cx, fencer_last_cy, fencer_exclude, strip)
                                 if new_id is not None:
                                     if new_id == fencer_candidate_id:
                                         fencer_candidate_count += 1
@@ -407,7 +431,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                     fencer_candidate_id = None
                                     fencer_candidate_count = 0
                     elif fencer_bbox is not None:
-                        fencer_track_id = _try_lock_id(result, fencer_bbox, fencer_exclude)
+                        fencer_track_id = _try_lock_id(result, fencer_bbox, fencer_exclude, strip)
                         if fencer_track_id is not None:
                             logger.info("Frame %d: locked fencer tracker ID %d",
                                         frame_idx_decoded, fencer_track_id)
@@ -438,7 +462,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                 new_id = None
                                 if opponent_last_cx is not None:
                                     new_id = _closest_id_excluding(
-                                        result, opponent_last_cx, opponent_last_cy, opponent_exclude)
+                                        result, opponent_last_cx, opponent_last_cy, opponent_exclude, strip)
                                 if new_id is not None:
                                     if new_id == opponent_candidate_id:
                                         opponent_candidate_count += 1
@@ -466,7 +490,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                                     opponent_candidate_id = None
                                     opponent_candidate_count = 0
                     elif opponent_bbox is not None:
-                        opponent_track_id = _try_lock_id(result, opponent_bbox, opponent_exclude)
+                        opponent_track_id = _try_lock_id(result, opponent_bbox, opponent_exclude, strip)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: locked opponent tracker ID %d",
                                         frame_idx_decoded, opponent_track_id)
@@ -478,7 +502,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
                             if center:
                                 opponent_last_cx, opponent_last_cy = center
                     elif fencer_track_id is not None:
-                        opponent_track_id = _best_other_id(result, fencer_track_id)
+                        opponent_track_id = _best_other_id(result, fencer_track_id, strip)
                         if opponent_track_id is not None:
                             logger.info("Frame %d: auto-assigned opponent tracker ID %d",
                                         frame_idx_decoded, opponent_track_id)

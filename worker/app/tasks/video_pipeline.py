@@ -112,11 +112,13 @@ def run_pipeline(self, bout_id: int, video_path: str):
 
             fencer_bbox = bout.fencer_bbox  # dict or None
             opponent_bbox = bout.opponent_bbox  # dict or None
+            strip = (bout.preview_data or {}).get("piste")  # strip polygon or None
 
             pose_results = run_pose_estimation(video_path, video_info, bout_id, db,
                                                progress_callback=pose_progress,
                                                fencer_bbox=fencer_bbox,
-                                               opponent_bbox=opponent_bbox)
+                                               opponent_bbox=opponent_bbox,
+                                               strip=strip)
             logger.info("Pose estimation complete: %d frames", len(pose_results))
 
             # Load frame ORM objects for downstream stages

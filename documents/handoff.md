@@ -26,42 +26,55 @@
 - Occlusion handling: predict-only coasting (writes BladeState each frame vs old buffering)
 - Confidence modulates measurement noise R (low confidence → trusts prediction more)
 - Process noise q=50.0, measurement noise r=0.001 — tuned for fast blade dynamics
-- Uses numpy (already a worker dependency)
 
-### Deployment Steps Required (P2a + P2b + P2c + P3a + P3b)
+### Strip (Piste) Auto-Detection (COMPLETE)
+- **Branch**: `feature/stage-3-blade-refinement`
+- New `worker/app/pipeline/strip.py` — auto-detects fencing strip from preview frames
+- Algorithm: LAB color sampling near ankles → color segmentation → morphological cleanup → contour scoring
+- Geometric fallback if color detection fails (uses ankle bounding box)
+- Stored in `preview_data.piste` JSON (no migration needed)
+- Integrated into skeleton tracking (`pose.py`):
+  - `_detection_on_strip()` checks if a detection's ankles are on the strip
+  - `_try_lock_id()`, `_closest_id_excluding()`, `_best_other_id()` all filter by strip
+  - Prevents locking onto referees, coaches, spectators off-strip
+  - Constrains re-lock after occlusion to strip-only candidates
+- Pipeline passes strip data from `preview_data` through to pose estimation
+
+### Deployment Steps Required (P2a + P2b + P2c + P3a + P3b + Strip)
 1. Run migrations: `alembic upgrade head` (two pending: `c4d5e6f7a8b9`, `d5e6f7a8b9c0`)
 2. Rebuild frontend: `podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/`
 3. Restart services: `podman-compose down && podman-compose up -d --no-build`
 4. Worker picks up Python changes via volume mount on restart (no rebuild needed)
-5. Re-process a bout to populate all new data
+5. Re-process a bout (including re-running preview to generate strip data)
 
 ## Current State
-- **Branch**: `feature/stage-3-blade-refinement` (includes all P2 + P3 work)
+- **Branch**: `feature/stage-3-blade-refinement`
 - **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed)
-- **Not yet deployed/tested** — P2a through P3b all committed but never run
-- **Frontend gaps**: does not yet surface preparation action type or blade speed metrics
+- **Not yet deployed/tested** — all changes committed but never run
+- **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics
 
 ## Branch Lineage
 ```
 master
   └─ feature/stage-2-blade-detection (P1, P2a, P2b)
        └─ feature/stage-2c-action-blade-integration (P2c)
-            └─ feature/stage-3-blade-refinement (P3a, P3b)  ← current
+            └─ feature/stage-3-blade-refinement (P3a, P3b, Strip)  ← current
 ```
 
 ## What's Next
 
 ### Deploy & Test (HIGH PRIORITY)
-- Five priorities of untested pipeline changes need end-to-end validation
-- Validate Kalman filter smoothness vs old EMA on real bout footage
+- Six features of untested pipeline changes need end-to-end validation
+- Validate strip detection on real bout footage (color vs geometric fallback)
+- Verify strip constraint prevents tracking extraneous skeletons
+- Validate Kalman filter smoothness vs old EMA
 - Check wrist angulation produces reasonable tip positions
 - Verify preparation detection fires correctly
-- Tune Kalman parameters (q=50, r=0.001) and angulation bounds (5°–25°) if needed
 
 ### Frontend Updates
+- Visualize detected strip polygon in configure UI (overlay on preview frames)
 - Surface `preparation` action type in action timeline / drill report
 - Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
-- Color-code preparation vs attack actions
 
 ### Priority 4 (Deferred to Stage 3+)
 - Guard/bell guard detection via custom YOLO
@@ -71,6 +84,8 @@ master
 
 ## Commits This Session
 ```
+<pending> Strip auto-detection: constrain skeleton tracking to piste region
+099c8e2 Update handoff with P3a+3b completion and branch lineage
 5815e93 Kalman filter + wrist angulation for blade tracking (P3a+3b)
 7246a56 Update handoff with P2c completion and deployment plan
 f90e38b Action-blade integration (P2c): reorder pipeline, preparation detection

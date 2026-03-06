@@ -17,6 +17,7 @@ from app.celery_app import celery_app
 from app.db import get_db_session
 from app.pipeline.ingest import ingest_video
 from app.pipeline.pose import _get_model, keypoints_to_dict
+from app.pipeline.strip import detect_strip
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +169,15 @@ def preview_skeletons(self, bout_id: int, video_path: str):
                     "detections": detections,
                 })
 
-            # Stage 4: Persist preview data
-            preview_data = {"frames": preview_frames}
+            # Stage 4: Detect fencing strip from preview frames
+            raw_frames = [frame for _, frame in frames_bgr]
+            frame_dets = [pf["detections"] for pf in preview_frames]
+            piste = detect_strip(raw_frames, frame_dets, width, height)
+            logger.info("Strip detection: method=%s, confidence=%.2f",
+                        piste.get("method"), piste.get("confidence", 0))
+
+            # Stage 5: Persist preview data
+            preview_data = {"frames": preview_frames, "piste": piste}
             bout.preview_data = preview_data
             bout.status = "preview_ready"
             db.commit()
