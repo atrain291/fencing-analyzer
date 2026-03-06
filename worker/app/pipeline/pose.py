@@ -15,6 +15,8 @@ import threading
 from queue import Queue
 from typing import Any
 
+from math import exp as _math_exp
+
 import numpy as np
 
 from app.pipeline.strip import ankles_on_strip
@@ -47,13 +49,14 @@ def _bbox_from_keypoints(kps: np.ndarray, scores: np.ndarray,
                          conf_thr: float = 0.3) -> dict | None:
     """Compute a normalized bounding box from keypoint positions.
 
-    Uses only keypoints with confidence >= conf_thr. Falls back to
+    Uses only keypoints with normalized confidence >= conf_thr. Falls back to
     conf_thr=0.1 if no keypoints pass the primary threshold.
     Returns dict {x1, y1, x2, y2} in 0-1 range, or None if unusable.
     """
-    valid = scores >= conf_thr
+    norm_scores = np.array([_normalize_score(float(s)) for s in scores])
+    valid = norm_scores >= conf_thr
     if not valid.any():
-        valid = scores >= 0.1
+        valid = norm_scores >= 0.1
     if not valid.any():
         return None
     pts = kps[valid]
@@ -157,8 +160,8 @@ def _find_best_confidence(detections: list[dict], exclude_indices: set[int],
             continue
         if not _detection_on_strip(all_kps[i], all_scores[i], width, height, strip):
             continue
-        # Mean confidence of body keypoints (first 17)
-        body_scores = all_scores[i][:17]
+        # Mean normalized confidence of body keypoints (first 17)
+        body_scores = np.array([_normalize_score(float(s)) for s in all_scores[i][:17]])
         mean_conf = float(body_scores[body_scores > 0.1].mean()) if (body_scores > 0.1).any() else 0.0
         if mean_conf > best_conf:
             best_conf = mean_conf
@@ -550,12 +553,22 @@ KEYPOINT_NAMES = [
 ]
 
 
+def _normalize_score(raw: float) -> float:
+    """Normalize SimCC logit scores to 0-1 probability range.
+
+    RTMPose 'performance' mode returns SimCC heatmap logits (~0-8 range)
+    rather than 0-1 probabilities. This sigmoid maps:
+      0.5 -> 0.27, 1.0 -> 0.50, 2.0 -> 0.88, 3.0+ -> ~1.0
+    """
+    return 1.0 / (1.0 + _math_exp(-(raw - 1.0) * 2.0))
+
+
 def keypoints_to_dict(kps: Any, scores: Any,
                       width: int = 1, height: int = 1) -> dict:
     """Convert keypoint arrays to a dict of named joints.
 
     kps: (133, 2) pixel coordinates from rtmlib
-    scores: (133,) confidence values
+    scores: (133,) SimCC confidence values (normalized to 0-1 via sigmoid)
     width/height: frame dimensions for normalization (pixel -> 0-1)
 
     Only the first 17 keypoints (COCO body) are stored.
@@ -565,9 +578,10 @@ def keypoints_to_dict(kps: Any, scores: Any,
         if i < len(kps):
             x = float(kps[i][0] / width) if width > 1 else float(kps[i][0])
             y = float(kps[i][1] / height) if height > 1 else float(kps[i][1])
-            c = float(scores[i]) if scores is not None and i < len(scores) else 0.0
+            raw = float(scores[i]) if scores is not None and i < len(scores) else 0.0
+            c = _normalize_score(raw)
             # Skip undetected keypoints
-            if c < 0.01 and x == 0.0 and y == 0.0:
+            if c < 0.05 and x == 0.0 and y == 0.0:
                 continue
             result[name] = {"x": x, "y": y, "z": 0.0, "confidence": c}
     return result

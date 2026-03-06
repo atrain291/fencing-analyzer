@@ -16,7 +16,7 @@ import numpy as np
 from app.celery_app import celery_app
 from app.db import get_db_session
 from app.pipeline.ingest import ingest_video
-from app.pipeline.pose import _get_model, keypoints_to_dict, _bbox_from_keypoints
+from app.pipeline.pose import _get_model, keypoints_to_dict, _bbox_from_keypoints, _normalize_score
 from app.pipeline.strip import detect_strip
 
 logger = logging.getLogger(__name__)
@@ -119,10 +119,11 @@ def preview_skeletons(self, bout_id: int, video_path: str):
                     kps = all_kps[j]
                     sc = all_scores[j]
 
-                    # Filter by mean body keypoint confidence
+                    # Filter by mean body keypoint confidence (normalized)
                     body_scores = sc[:17]
-                    mean_conf = float(body_scores[body_scores > 0.1].mean()) \
-                        if (body_scores > 0.1).any() else 0.0
+                    norm_body = np.array([_normalize_score(float(s)) for s in body_scores])
+                    mean_conf = float(norm_body[norm_body > 0.1].mean()) \
+                        if (norm_body > 0.1).any() else 0.0
                     if mean_conf < MIN_CONFIDENCE:
                         continue
 

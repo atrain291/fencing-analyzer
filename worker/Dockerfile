@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install RTMPose (rtmlib) + other ML deps
+# rtmlib pulls in onnxruntime (CPU) — install it first, then replace with GPU version
 RUN pip install --no-cache-dir \
     rtmlib \
-    onnxruntime-gpu \
     celery[redis]==5.4.0 \
     redis==5.1.1 \
     sqlalchemy==2.0.35 \
@@ -21,6 +21,11 @@ RUN pip install --no-cache-dir \
     anthropic==0.40.0 \
     httpx==0.27.2 \
     opencv-python-headless==4.10.0.84 \
-    ffmpeg-python==0.2.0
+    ffmpeg-python==0.2.0 \
+    && pip uninstall -y onnxruntime \
+    && pip install --no-cache-dir onnxruntime-gpu
+
+# Expose CUDA/cuDNN libs from nvidia pip packages to onnxruntime-gpu
+ENV LD_LIBRARY_PATH="/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cufft/lib:/opt/conda/lib/python3.11/site-packages/nvidia/curand/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusolver/lib:${LD_LIBRARY_PATH}"
 
 COPY . .

@@ -4,7 +4,7 @@ services:
     image: localhost/fencing-analyzer-frontend:latest
     build: ./frontend
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -22,7 +22,7 @@ services:
     image: localhost/fencing-analyzer-api:latest
     build: ./backend
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
       - uploads:/app/uploads
@@ -67,9 +67,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fencing}
       POSTGRES_DB: ${POSTGRES_DB:-fencing_analyzer}
     volumes:
-      - /run/media/adeitz/4e1293b5-6a6b-41e6-bcf5-c7326066fa09/fencing-data/postgres:/var/lib/postgresql/data
+      - /mnt/data/fencing-data/postgres:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     networks:
       - fencing
     security_opt:
@@ -78,9 +78,9 @@ services:
   redis:
     image: docker.io/library/redis:7-alpine
     volumes:
-      - /run/media/adeitz/4e1293b5-6a6b-41e6-bcf5-c7326066fa09/fencing-data/redis:/data
+      - /mnt/data/fencing-data/redis:/data
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     networks:
       - fencing
     security_opt:
@@ -91,7 +91,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_PORT:-11434}:11434"
     networks:
       - fencing
     devices:
