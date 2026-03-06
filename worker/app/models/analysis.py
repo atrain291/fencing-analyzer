@@ -15,6 +15,8 @@ class Action(Base):
     end_ms: Mapped[int] = mapped_column(Integer)
     outcome: Mapped[str | None] = mapped_column(String(50))
     confidence: Mapped[float | None] = mapped_column(Float)
+    blade_speed_avg: Mapped[float | None] = mapped_column(Float)
+    blade_speed_peak: Mapped[float | None] = mapped_column(Float)
 
 
 class Frame(Base):

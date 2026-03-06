@@ -32,6 +32,8 @@ class ActionRead(BaseModel):
     end_ms: int
     outcome: str | None
     confidence: float | None
+    blade_speed_avg: float | None = None
+    blade_speed_peak: float | None = None
 
 
 class AnalysisRead(BaseModel):

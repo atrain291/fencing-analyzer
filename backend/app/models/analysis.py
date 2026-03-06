@@ -15,6 +15,8 @@ class Action(Base):
     end_ms: Mapped[int] = mapped_column(Integer)
     outcome: Mapped[str | None] = mapped_column(String(50))  # touch, miss, parried
     confidence: Mapped[float | None] = mapped_column(Float)
+    blade_speed_avg: Mapped[float | None] = mapped_column(Float)
+    blade_speed_peak: Mapped[float | None] = mapped_column(Float)
 
     bout: Mapped["Bout"] = relationship(back_populates="actions")  # noqa: F821
 

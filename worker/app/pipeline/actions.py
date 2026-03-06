@@ -1,9 +1,12 @@
 """Stage 2 — Rule-based action classification.
 
 Detected actions:
-  advance, retreat, lunge, en_garde, fleche, step_lunge, check_step, recovery
+  advance, retreat, lunge, en_garde, fleche, step_lunge, check_step,
+  recovery, preparation
 """
 import logging
+
+from app.pipeline.orientation import detect_orientation
 
 logger = logging.getLogger(__name__)
 
@@ -24,84 +27,37 @@ _STEP_LUNGE_WINDOW_MS = 300    # time window: advance -> front foot hits lunge s
 _RECOVERY_BACKWARD_THRESHOLD = 0.15  # center of mass moving backward
 _RECOVERY_STANCE_TOLERANCE = 0.15    # stance width must normalize (ratio vs initial)
 
+# Blade speed thresholds (normalized units / second)
+_BLADE_ATTACK_THRESHOLD = 0.40   # blade speed indicating genuine attack intent
+_BLADE_PREP_THRESHOLD = 0.15     # blade speed below this during foot movement = preparation
 
-def _detect_orientation(frames: list) -> str:
+
+def run_action_classification(bout_id: int, frames: list, db,
+                              blade_speeds: dict[int, dict] | None = None) -> list[dict]:
     """
-    Determine fencer facing direction from shoulder/hip x positions.
+    Classify fencing actions from per-frame ankle positions and blade speed.
 
-    Compares average left vs right shoulder+hip x across all valid frames.
-    If left body side has higher x on average, fencer faces right (weapon arm
-    toward lower x).  Otherwise fencer faces left.
+    blade_speeds: optional dict mapping frame_id -> {"speed": float, "confidence": float | None}
+                  from BladeState rows. When provided, blade speed enriches lunge/fleche
+                  detection and enables preparation classification.
 
-    Returns 'right' or 'left'.
-    """
-    sum_left_x = 0.0
-    sum_right_x = 0.0
-    count = 0
-
-    for frame in frames:
-        pose = frame.fencer_pose
-        if not pose:
-            continue
-
-        ls = pose.get("left_shoulder", {})
-        rs = pose.get("right_shoulder", {})
-        lh = pose.get("left_hip", {})
-        rh = pose.get("right_hip", {})
-
-        # Need at least one shoulder and one hip on each side
-        has_left = (ls.get("confidence", 0) >= _CONF_THRESHOLD
-                    or lh.get("confidence", 0) >= _CONF_THRESHOLD)
-        has_right = (rs.get("confidence", 0) >= _CONF_THRESHOLD
-                     or rh.get("confidence", 0) >= _CONF_THRESHOLD)
-        if not (has_left and has_right):
-            continue
-
-        left_x = 0.0
-        left_n = 0
-        if ls.get("confidence", 0) >= _CONF_THRESHOLD:
-            left_x += ls["x"]
-            left_n += 1
-        if lh.get("confidence", 0) >= _CONF_THRESHOLD:
-            left_x += lh["x"]
-            left_n += 1
-
-        right_x = 0.0
-        right_n = 0
-        if rs.get("confidence", 0) >= _CONF_THRESHOLD:
-            right_x += rs["x"]
-            right_n += 1
-        if rh.get("confidence", 0) >= _CONF_THRESHOLD:
-            right_x += rh["x"]
-            right_n += 1
-
-        sum_left_x += left_x / left_n
-        sum_right_x += right_x / right_n
-        count += 1
-
-    if count == 0:
-        return "right"  # default assumption
-
-    avg_left = sum_left_x / count
-    avg_right = sum_right_x / count
-
-    # If the anatomical left side has higher x, the fencer faces screen-right
-    # (their left shoulder is further right on screen).
-    orientation = "right" if avg_left > avg_right else "left"
-    logger.info("Fencer orientation detected: facing %s (left_x=%.3f, right_x=%.3f, %d samples)",
-                orientation, avg_left, avg_right, count)
-    return orientation
-
-
-def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
-    """
-    Classify fencing actions from per-frame ankle positions.
     Returns a list of action dicts and writes Action records to the DB.
     """
     from app.models.analysis import Action
 
-    # Detect which direction the fencer faces
-    orientation = _detect_orientation(frames)
+    orientation = detect_orientation(frames)
+
+    # Build a timestamp->blade_speed lookup if blade data is available
+    blade_by_ts: dict[int, float] = {}
+    blade_conf_by_ts: dict[int, float] = {}
+    if blade_speeds:
+        for frame in frames:
+            bs = blade_speeds.get(frame.id)
+            if bs and bs.get("speed") is not None:
+                blade_by_ts[frame.timestamp_ms] = bs["speed"]
+                blade_conf_by_ts[frame.timestamp_ms] = bs.get("confidence") or 0.0
+
+    has_blade = len(blade_by_ts) > 0
 
     # Build position timeline from frames with valid ankle keypoints
     timeline = []
@@ -118,32 +74,23 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
         lax, lay = la["x"], la["y"]
         rax, ray = ra["x"], ra["y"]
 
-        # Determine front/back foot based on orientation.
-        # Facing right: front foot has LOWER x (closer to left edge, toward opponent).
-        # Facing left:  front foot has HIGHER x (closer to right edge, toward opponent).
         if orientation == "right":
             if lax < rax:
                 front_x, back_x = lax, rax
-                front_label, back_label = "left", "right"
             else:
                 front_x, back_x = rax, lax
-                front_label, back_label = "right", "left"
         else:
-            # Facing left: front foot has higher x
             if lax > rax:
                 front_x, back_x = lax, rax
-                front_label, back_label = "left", "right"
             else:
                 front_x, back_x = rax, lax
-                front_label, back_label = "right", "left"
 
         foot_center_x = (lax + rax) / 2
         stance_width = abs(front_x - back_x)
 
-        # Gather hip data for center-of-mass estimate
         lh = pose.get("left_hip", {})
         rh = pose.get("right_hip", {})
-        com_x = foot_center_x  # fallback
+        com_x = foot_center_x
         hip_count = 0
         hip_sum = 0.0
         if lh.get("confidence", 0) >= _CONF_THRESHOLD:
@@ -170,14 +117,10 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
         logger.info("Action classification: too few frames (%d), skipping", len(timeline))
         return []
 
-    # Compute baseline stance width from first 10 valid frames
     baseline_stance = sum(t["stance_width"] for t in timeline[:10]) / min(10, len(timeline))
     if baseline_stance < 0.01:
-        baseline_stance = 0.05  # safety floor
+        baseline_stance = 0.05
 
-    # Sign convention: "forward" depends on orientation.
-    # Facing right: forward = negative dx (decreasing x toward opponent on the left).
-    # Facing left:  forward = positive dx (increasing x toward opponent on the right).
     fwd_sign = -1.0 if orientation == "right" else 1.0
 
     # Sliding window classification
@@ -189,7 +132,6 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
     for i in range(len(timeline) - 1):
         t0 = timeline[i]
 
-        # Find window end (~400ms ahead)
         j = i
         while j < len(timeline) - 1 and timeline[j + 1]["ts"] - t0["ts"] < _WINDOW_MS:
             j += 1
@@ -199,20 +141,20 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
         if dt < 0.05:
             continue
 
-        # Raw velocities (screen units/sec, sign-adjusted so positive = forward)
         dx_center = fwd_sign * (t1["foot_center_x"] - t0["foot_center_x"]) / dt
         dx_front = fwd_sign * (t1["front_x"] - t0["front_x"]) / dt
         dx_back = fwd_sign * (t1["back_x"] - t0["back_x"]) / dt
         dx_com = fwd_sign * (t1["com_x"] - t0["com_x"]) / dt
 
-        # Both-ankle forward speeds (for fleche detection)
         dx_left = fwd_sign * (t1["lax"] - t0["lax"]) / dt
         dx_right = fwd_sign * (t1["rax"] - t0["rax"]) / dt
 
-        # Back ankle crosses front ankle? (fleche indicator)
         back_crossed_front = (t0["back_x"] != t1["back_x"] and
                               ((orientation == "right" and t1["back_x"] < t1["front_x"]) or
                                (orientation == "left" and t1["back_x"] > t1["front_x"])))
+
+        # Get average blade speed in this window
+        window_blade_speed = _avg_blade_speed(blade_by_ts, t0["ts"], t1["ts"])
 
         # ---- Classification priority (most specific first) ----
 
@@ -221,16 +163,29 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
                 and back_crossed_front):
             action_type = "fleche"
             confidence = min(1.0, min(dx_left, dx_right) / 0.70)
+            if has_blade and window_blade_speed is not None:
+                confidence = _blend_blade_confidence(confidence, window_blade_speed)
 
         # 2. Lunge: front foot extends fast, back foot stays still
         elif dx_front > _LUNGE_FRONT_THRESHOLD and abs(dx_back) < _LUNGE_BACK_THRESHOLD:
-            action_type = "lunge"
-            confidence = min(1.0, dx_front / 0.70)
+            if has_blade and window_blade_speed is not None and window_blade_speed < _BLADE_PREP_THRESHOLD:
+                # Foot says lunge but blade isn't moving — preparation
+                action_type = "preparation"
+                confidence = min(1.0, dx_front / 0.70) * 0.85
+            else:
+                action_type = "lunge"
+                confidence = min(1.0, dx_front / 0.70)
+                if has_blade and window_blade_speed is not None:
+                    confidence = _blend_blade_confidence(confidence, window_blade_speed)
 
         # 3. Advance: both feet move forward together
         elif dx_center > _ADV_RET_THRESHOLD:
-            action_type = "advance"
-            confidence = min(1.0, dx_center / 0.55)
+            if has_blade and window_blade_speed is not None and window_blade_speed < _BLADE_PREP_THRESHOLD:
+                action_type = "preparation"
+                confidence = min(1.0, dx_center / 0.55) * 0.85
+            else:
+                action_type = "advance"
+                confidence = min(1.0, dx_center / 0.55)
 
         # 4. Retreat: both feet move backward together
         elif dx_center < -_ADV_RET_THRESHOLD:
@@ -245,7 +200,6 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
         if action_type == current_type:
             current_conf = max(current_conf, confidence)
         else:
-            # Emit previous action if long enough and not en_garde
             if (current_type and current_type != "en_garde"
                     and current_start is not None
                     and t0["ts"] - current_start >= _MIN_ACTION_MS):
@@ -273,6 +227,10 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
     # ---- Second pass: refine composite actions ----
     raw_actions = _refine_actions(raw_actions, timeline, baseline_stance, fwd_sign)
 
+    # ---- Third pass: enrich actions with blade metrics ----
+    if has_blade:
+        raw_actions = _enrich_with_blade(raw_actions, blade_by_ts)
+
     # Write Action records to DB
     for a in raw_actions:
         action = Action(
@@ -282,12 +240,40 @@ def run_action_classification(bout_id: int, frames: list, db) -> list[dict]:
             end_ms=a["end_ms"],
             outcome=None,
             confidence=a["confidence"],
+            blade_speed_avg=a.get("blade_speed_avg"),
+            blade_speed_peak=a.get("blade_speed_peak"),
         )
         db.add(action)
 
     db.commit()
     logger.info("Action classification complete: %d actions detected", len(raw_actions))
     return raw_actions
+
+
+def _avg_blade_speed(blade_by_ts: dict[int, float], start_ts: int, end_ts: int) -> float | None:
+    """Average blade speed across timestamps in the window."""
+    if not blade_by_ts:
+        return None
+    speeds = [s for ts, s in blade_by_ts.items() if start_ts <= ts <= end_ts]
+    return sum(speeds) / len(speeds) if speeds else None
+
+
+def _blend_blade_confidence(foot_confidence: float, blade_speed: float) -> float:
+    """Boost action confidence when blade speed confirms attack intent."""
+    blade_factor = min(1.0, blade_speed / _BLADE_ATTACK_THRESHOLD)
+    # 70% foot-based, 30% blade-based
+    return foot_confidence * 0.7 + blade_factor * 0.3
+
+
+def _enrich_with_blade(actions: list[dict], blade_by_ts: dict[int, float]) -> list[dict]:
+    """Add blade_speed_avg and blade_speed_peak to each action."""
+    for a in actions:
+        speeds = [s for ts, s in blade_by_ts.items()
+                  if a["start_ms"] <= ts <= a["end_ms"]]
+        if speeds:
+            a["blade_speed_avg"] = sum(speeds) / len(speeds)
+            a["blade_speed_peak"] = max(speeds)
+    return actions
 
 
 def _refine_actions(actions: list[dict], timeline: list[dict],
@@ -301,7 +287,6 @@ def _refine_actions(actions: list[dict], timeline: list[dict],
     if not actions:
         return actions
 
-    # Build a quick timestamp->index lookup for the timeline
     ts_to_idx = {}
     for idx, t in enumerate(timeline):
         ts_to_idx[t["ts"]] = idx
@@ -309,7 +294,6 @@ def _refine_actions(actions: list[dict], timeline: list[dict],
     def _find_nearest_idx(ts: int) -> int | None:
         if ts in ts_to_idx:
             return ts_to_idx[ts]
-        # Linear scan for nearest
         best_idx = None
         best_dist = float("inf")
         for idx, t in enumerate(timeline):
@@ -319,7 +303,6 @@ def _refine_actions(actions: list[dict], timeline: list[dict],
                 best_idx = idx
         return best_idx
 
-    # Compute median advance distance for check_step comparison
     advance_distances = []
     for a in actions:
         if a["type"] == "advance":
@@ -375,16 +358,13 @@ def _refine_actions(actions: list[dict], timeline: list[dict],
         if a["type"] == "retreat" and i > 0:
             prev_a = refined[-1] if refined else actions[i - 1]
             if prev_a["type"] in ("lunge", "fleche", "step_lunge"):
-                # Check that stance width returns toward baseline
                 si = _find_nearest_idx(a["start_ms"])
                 ei = _find_nearest_idx(a["end_ms"])
                 if si is not None and ei is not None:
                     start_stance = timeline[si]["stance_width"]
                     end_stance = timeline[ei]["stance_width"]
-                    # Stance is normalizing if end stance is closer to baseline than start
                     normalizing = (abs(end_stance - baseline_stance)
                                    < abs(start_stance - baseline_stance) + _RECOVERY_STANCE_TOLERANCE)
-                    # Also check center-of-mass is moving backward
                     dt = (timeline[ei]["ts"] - timeline[si]["ts"]) / 1000.0
                     if dt > 0:
                         com_vel = fwd_sign * (timeline[ei]["com_x"] - timeline[si]["com_x"]) / dt

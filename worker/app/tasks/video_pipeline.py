@@ -29,6 +29,7 @@ from app.pipeline.ingest import ingest_video
 from app.pipeline.pose import run_pose_estimation
 from app.pipeline.blade import run_blade_tracking
 from app.pipeline.actions import run_action_classification
+from app.pipeline.orientation import detect_orientation
 from app.pipeline.llm import synthesize_coaching_feedback
 
 logger = logging.getLogger(__name__)
@@ -36,8 +37,8 @@ logger = logging.getLogger(__name__)
 STAGES = [
     "ingest",
     "pose_estimation",
-    "action_classification",
     "blade_tracking",
+    "action_classification",
     # "llm_synthesis",  # disabled — re-enable when LLM coaching is needed
 ]
 
@@ -124,17 +125,26 @@ def run_pipeline(self, bout_id: int, video_path: str):
                       .order_by(Frame.timestamp_ms)
                       .all())
 
-            # Stage 3 — Action classification first (need orientation for blade)
-            _update_progress(bout_id, "action_classification", 83, db)
-            from app.pipeline.actions import _detect_orientation
-            orientation = _detect_orientation(frames)
-            action_results = run_action_classification(bout_id, frames, db)
-            logger.info("Action classification complete: %d actions", len(action_results))
-
-            # Stage 4 — Blade tracking (86%, uses orientation from actions)
-            _update_progress(bout_id, "blade_tracking", 86, db)
+            # Stage 3 — Blade tracking (orientation needed, runs before actions)
+            _update_progress(bout_id, "blade_tracking", 83, db)
+            orientation = detect_orientation(frames)
             run_blade_tracking(frames, video_info, db, orientation=orientation)
             logger.info("Blade tracking complete")
+
+            # Stage 4 — Action classification (uses blade speed data)
+            _update_progress(bout_id, "action_classification", 86, db)
+            from app.models.analysis import BladeState
+            blade_rows = (db.query(BladeState)
+                          .join(Frame, BladeState.frame_id == Frame.id)
+                          .filter(Frame.bout_id == bout_id)
+                          .all())
+            blade_speeds = {
+                bs.frame_id: {"speed": bs.speed, "confidence": bs.confidence}
+                for bs in blade_rows
+            }
+            action_results = run_action_classification(bout_id, frames, db,
+                                                       blade_speeds=blade_speeds)
+            logger.info("Action classification complete: %d actions", len(action_results))
 
             # Stage 5 — LLM synthesis (DISABLED — skip to complete)
             # To re-enable, uncomment the block below and remove the stub.
