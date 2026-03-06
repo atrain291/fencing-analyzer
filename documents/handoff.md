@@ -40,8 +40,19 @@
   - Constrains re-lock after occlusion to strip-only candidates
 - Pipeline passes strip data from `preview_data` through to pose estimation
 
-### Deployment Steps Required (P2a + P2b + P2c + P3a + P3b + Strip)
-1. Run migrations: `alembic upgrade head` (two pending: `c4d5e6f7a8b9`, `d5e6f7a8b9c0`)
+### Fencer Housekeeping (COMPLETE)
+- **Branch**: `feature/stage-3-blade-refinement`
+- Unique constraint on `fencer.name` (DB + application-level check + frontend validation)
+- `DELETE /fencers/{id}` endpoint with full cascade cleanup:
+  - Revokes in-progress Celery tasks
+  - Deletes video files, thumbnails, and preview images from disk
+  - Cascades through Fencer → Sessions → Bouts → Actions/Frames/Analysis/BladeStates
+- Added `cascade="all, delete-orphan"` to `Fencer.sessions` and `Session.bouts`
+- Frontend: duplicate name error handling (client-side + 409), trash icon on fencer list, confirm dialog
+- Alembic migration `e6f7a8b9c0d1` for unique constraint
+
+### Deployment Steps Required (all pending changes)
+1. Run migrations: `alembic upgrade head` (three pending: `c4d5e6f7a8b9`, `d5e6f7a8b9c0`, `e6f7a8b9c0d1`)
 2. Rebuild frontend: `podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/`
 3. Restart services: `podman-compose down && podman-compose up -d --no-build`
 4. Worker picks up Python changes via volume mount on restart (no rebuild needed)
@@ -49,7 +60,7 @@
 
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
-- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed)
+- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
 - **Not yet deployed/tested** — all changes committed but never run
 - **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics
 
@@ -58,7 +69,7 @@
 master
   └─ feature/stage-2-blade-detection (P1, P2a, P2b)
        └─ feature/stage-2c-action-blade-integration (P2c)
-            └─ feature/stage-3-blade-refinement (P3a, P3b, Strip)  ← current
+            └─ feature/stage-3-blade-refinement (P3a, P3b, Strip, Fencer housekeeping)  ← current
 ```
 
 ## What's Next
@@ -84,7 +95,8 @@ master
 
 ## Commits This Session
 ```
-<pending> Strip auto-detection: constrain skeleton tracking to piste region
+e74f52f Strip auto-detection: constrain skeleton tracking to piste region
+<pending> Fencer housekeeping: unique names, delete with cascade
 099c8e2 Update handoff with P3a+3b completion and branch lineage
 5815e93 Kalman filter + wrist angulation for blade tracking (P3a+3b)
 7246a56 Update handoff with P2c completion and deployment plan

@@ -17,7 +17,7 @@ class Session(Base):
     notes: Mapped[str | None] = mapped_column(String(2000))
 
     fencer: Mapped["Fencer"] = relationship(back_populates="sessions")  # noqa: F821
-    bouts: Mapped[list["Bout"]] = relationship(back_populates="session")
+    bouts: Mapped[list["Bout"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 
 class Bout(Base):

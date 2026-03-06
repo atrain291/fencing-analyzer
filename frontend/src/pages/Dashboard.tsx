@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Upload, User, AlertCircle, FileVideo, Clock, Trash2 } from 'lucide-react'
-import { listFencers, createFencer, type Fencer } from '@/api/fencers'
+import { listFencers, createFencer, deleteFencer, type Fencer } from '@/api/fencers'
 import { uploadVideo, deleteBout, listBouts, getThumbnailUrl, type BoutSummary } from '@/api/bouts'
 import clsx from 'clsx'
 
@@ -71,14 +71,40 @@ export default function Dashboard() {
   }, [selectedFencer])
 
   async function handleCreateFencer() {
-    if (!newFencerName.trim()) return
+    const name = newFencerName.trim()
+    if (!name) return
+    if (fencers.some(f => f.name.toLowerCase() === name.toLowerCase())) {
+      setError('A fencer with this name already exists')
+      return
+    }
+    setError('')
     try {
-      const f = await createFencer(newFencerName.trim())
+      const f = await createFencer(name)
       setFencers(prev => [f, ...prev])
       setSelectedFencer(f.id)
       setNewFencerName('')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { status?: number } })?.response?.status === 409
+        ? 'A fencer with this name already exists'
+        : 'Failed to create fencer profile'
+      setError(msg)
+    }
+  }
+
+  async function handleDeleteFencer(fencerId: number) {
+    const fencer = fencers.find(f => f.id === fencerId)
+    if (!fencer) return
+    if (!window.confirm(`Delete "${fencer.name}" and all their bouts? This cannot be undone.`)) return
+    setFencers(prev => prev.filter(f => f.id !== fencerId))
+    if (selectedFencer === fencerId) {
+      setSelectedFencer(null)
+      setBouts([])
+    }
+    try {
+      await deleteFencer(fencerId)
     } catch {
-      setError('Failed to create fencer profile')
+      listFencers().then(setFencers).catch(() => {})
+      setError('Failed to delete fencer')
     }
   }
 
@@ -138,18 +164,26 @@ export default function Dashboard() {
         </div>
         <div className="space-y-1">
           {fencers.map(f => (
-            <button
-              key={f.id}
-              onClick={() => setSelectedFencer(f.id)}
-              className={clsx(
-                'w-full text-left px-3 py-2 rounded-lg text-sm transition-colors',
-                selectedFencer === f.id
-                  ? 'bg-brand-500/20 text-brand-500 ring-1 ring-brand-500'
-                  : 'hover:bg-gray-800 text-gray-300',
-              )}
-            >
-              {f.name}
-            </button>
+            <div key={f.id} className="flex items-center gap-1">
+              <button
+                onClick={() => setSelectedFencer(f.id)}
+                className={clsx(
+                  'flex-1 text-left px-3 py-2 rounded-lg text-sm transition-colors',
+                  selectedFencer === f.id
+                    ? 'bg-brand-500/20 text-brand-500 ring-1 ring-brand-500'
+                    : 'hover:bg-gray-800 text-gray-300',
+                )}
+              >
+                {f.name}
+              </button>
+              <button
+                onClick={() => handleDeleteFencer(f.id)}
+                className="flex-shrink-0 p-2 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                title="Delete fencer"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           ))}
           {fencers.length === 0 && (
             <p className="text-gray-500 text-sm">No fencer profiles yet. Add one above.</p>

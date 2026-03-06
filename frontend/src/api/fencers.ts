@@ -15,3 +15,7 @@ export async function createFencer(name: string): Promise<Fencer> {
   const { data } = await api.post<Fencer>('/fencers/', { name })
   return data
 }
+
+export async function deleteFencer(fencerId: number): Promise<void> {
+  await api.delete(`/fencers/${fencerId}`)
+}
