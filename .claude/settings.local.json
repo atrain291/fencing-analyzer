@@ -49,7 +49,22 @@
       "mcp__playwright__browser_type",
       "mcp__playwright__browser_click",
       "mcp__playwright__browser_wait_for",
-      "mcp__playwright__browser_evaluate"
+      "mcp__playwright__browser_evaluate",
+      "WebFetch(domain:docs.ultralytics.com)",
+      "WebFetch(domain:community.ultralytics.com)",
+      "WebFetch(domain:hub.docker.com)",
+      "Bash(podman system:*)",
+      "Bash(lsblk:*)",
+      "Bash(sudo:*)",
+      "Bash(podman images:*)",
+      "Bash(podman:*)",
+      "Bash(cp:*)",
+      "mcp__playwright__browser_handle_dialog",
+      "mcp__playwright__browser_close",
+      "Bash(npm run:*)",
+      "mcp__playwright__browser_fill_form",
+      "Bash(BASE=/run/media/adeitz/4e1293b5-6a6b-41e6-bcf5-c7326066fa09/source/fencing-analyzer/.claude/worktrees/agent-af611abf)",
+      "Read(//run/media/adeitz/4e1293b5-6a6b-41e6-bcf5-c7326066fa09/source/fencing-analyzer/.claude/worktrees/agent-af611abf/$BASE/worker/app/pipeline/**)"
     ]
   },
   "enableAllProjectMcpServers": true,
