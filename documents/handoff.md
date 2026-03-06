@@ -1,67 +1,39 @@
-# Session 9 Handoff — 2026-03-05
+# Session 10 Handoff — 2026-03-06
 
 ## What Was Done
 
-### Priority 2c — Action-Blade Integration (COMPLETE)
-- **Commit**: `f90e38b` on `feature/stage-2c-action-blade-integration`
-- Extracted `detect_orientation()` to `worker/app/pipeline/orientation.py`
-- Reordered pipeline: blade tracking → action classification
-- `run_action_classification()` accepts optional `blade_speeds` dict
-- New **"preparation"** action type: foot movement + blade speed < 0.15
-- Blade confidence blending: 70% foot + 30% blade for lunge/fleche
-- `blade_speed_avg` / `blade_speed_peak` columns on Action model
-- Alembic migration `d5e6f7a8b9c0`
+### RTMPose WholeBody Migration (COMPLETE)
+- **Commits**: `6fa5fc3`, `cbc5b62` on `feature/stage-3-blade-refinement`
+- Replaced YOLO11x-Pose (ultralytics) with RTMPose WholeBody (rtmlib)
+- RTMPose provides 133 keypoints (17 body + 6 feet + 68 face + 42 hands)
+- First 17 body keypoints are identical to COCO-17 — all downstream code unchanged
+- Proximity-based person matching replaces BoT-SORT tracker IDs:
+  - Initial lock: user ROI bbox from preview
+  - Frame-to-frame: closest center distance (max 15% of frame diagonal)
+  - Re-lock after occlusion: expanded search with 3-frame confirmation gate
+- `_normalize_score()` sigmoid converts SimCC logits (0-8 range) to 0-1 probabilities
+- Removed: `botsort_fencing.yaml`, `export_tensorrt.py`
+- Migration plan with deferred options: `documents/rtmpose_migration.md`
 
-### Priority 3a — Wrist Angulation Correction (COMPLETE)
-- **Commit**: `5815e93` on `feature/stage-3-blade-refinement`
-- `_compute_wrist_angulation()` maps arm extension ratio to deflection angle (5°–25°)
-- Exponential ramp (exponent 1.4): more angulation at higher extension
-- Direction: inward toward opponent (clockwise for right-facing, counter-clockwise for left)
-- Integrated into `_compute_raw_tip()` — rotates blade direction vector before projection
+### GPU Inference Fix (COMPLETE)
+- rtmlib depends on `onnxruntime` (CPU) which shadows `onnxruntime-gpu`
+- Fix: uninstall CPU version before installing GPU version in Dockerfile
+- Added `LD_LIBRARY_PATH` for nvidia pip package CUDA/cuDNN shared libs
+- Verified: `CUDAExecutionProvider` + `TensorrtExecutionProvider` available
 
-### Priority 3b — Kalman Filter (COMPLETE)
-- **Commit**: `5815e93` on `feature/stage-3-blade-refinement`
-- `BladeKalmanFilter` class: 4-state `[x, y, vx, vy]` with variable dt
-- Replaces EMA smoothing, manual velocity calculation, and `_interpolate_gap()`
-- Occlusion handling: predict-only coasting (writes BladeState each frame vs old buffering)
-- Confidence modulates measurement noise R (low confidence → trusts prediction more)
-- Process noise q=50.0, measurement noise r=0.001 — tuned for fast blade dynamics
+### Configurable Ports (COMPLETE)
+- Added `.env` variables: `FRONTEND_PORT`, `API_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, `OLLAMA_PORT`
+- `docker-compose.yml` uses `${VAR:-default}` substitution for host port mappings
+- Container-internal ports unchanged; only host-side mappings are configurable
 
-### Strip (Piste) Auto-Detection (COMPLETE)
-- **Branch**: `feature/stage-3-blade-refinement`
-- New `worker/app/pipeline/strip.py` — auto-detects fencing strip from preview frames
-- Algorithm: LAB color sampling near ankles → color segmentation → morphological cleanup → contour scoring
-- Geometric fallback if color detection fails (uses ankle bounding box)
-- Stored in `preview_data.piste` JSON (no migration needed)
-- Integrated into skeleton tracking (`pose.py`):
-  - `_detection_on_strip()` checks if a detection's ankles are on the strip
-  - `_try_lock_id()`, `_closest_id_excluding()`, `_best_other_id()` all filter by strip
-  - Prevents locking onto referees, coaches, spectators off-strip
-  - Constrains re-lock after occlusion to strip-only candidates
-- Pipeline passes strip data from `preview_data` through to pose estimation
-
-### Fencer Housekeeping (COMPLETE)
-- **Branch**: `feature/stage-3-blade-refinement`
-- Unique constraint on `fencer.name` (DB + application-level check + frontend validation)
-- `DELETE /fencers/{id}` endpoint with full cascade cleanup:
-  - Revokes in-progress Celery tasks
-  - Deletes video files, thumbnails, and preview images from disk
-  - Cascades through Fencer → Sessions → Bouts → Actions/Frames/Analysis/BladeStates
-- Added `cascade="all, delete-orphan"` to `Fencer.sessions` and `Session.bouts`
-- Frontend: duplicate name error handling (client-side + 409), trash icon on fencer list, confirm dialog
-- Alembic migration `e6f7a8b9c0d1` for unique constraint
-
-### Deployment Steps Required (all pending changes)
-1. Run migrations: `alembic upgrade head` (three pending: `c4d5e6f7a8b9`, `d5e6f7a8b9c0`, `e6f7a8b9c0d1`)
-2. Rebuild frontend: `podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/`
-3. Restart services: `podman-compose down && podman-compose up -d --no-build`
-4. Worker picks up Python changes via volume mount on restart (no rebuild needed)
-5. Re-process a bout (including re-running preview to generate strip data)
+### Data Path Fix (COMPLETE)
+- Updated postgres/redis bind mounts from old external drive UUID to `/mnt/data/fencing-data/`
 
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
+- **All 6 containers running**: frontend(:5173), api(:8000), worker(GPU), postgres(:5432), redis(:6379), ollama(:11434)
 - **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
-- **Not yet deployed/tested** — all changes committed but never run
+- **RTMPose models**: auto-downloaded to `~/.cache/rtmlib/` on first inference
 - **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics
 
 ## Branch Lineage
@@ -69,42 +41,40 @@
 master
   └─ feature/stage-2-blade-detection (P1, P2a, P2b)
        └─ feature/stage-2c-action-blade-integration (P2c)
-            └─ feature/stage-3-blade-refinement (P3a, P3b, Strip, Fencer housekeeping)  ← current
+            └─ feature/stage-3-blade-refinement (P3a, P3b, Strip, Housekeeping, RTMPose)  <- current
 ```
 
 ## What's Next
 
 ### Deploy & Test (HIGH PRIORITY)
-- Six features of untested pipeline changes need end-to-end validation
-- Validate strip detection on real bout footage (color vs geometric fallback)
-- Verify strip constraint prevents tracking extraneous skeletons
-- Validate Kalman filter smoothness vs old EMA
-- Check wrist angulation produces reasonable tip positions
-- Verify preparation detection fires correctly
+- Run pending Alembic migrations
+- Process a bout end-to-end with RTMPose and verify:
+  - GPU utilization during inference
+  - Correct skeleton overlays in review UI
+  - Confidence values in 0-1 range
+  - Fencer/opponent tracking stability
+  - Strip detection constraining skeleton selection
+  - Blade tracking, action classification still working
+
+### Future RTMPose Opportunities (documented in rtmpose_migration.md)
+- Hand keypoints (indices 91-132): improve blade tip detection from grip position
+- Foot keypoints (indices 17-22): more precise footwork analysis
+- Alternative tracking: custom IoU matching or standalone ByteTrack/BoT-SORT
 
 ### Frontend Updates
-- Visualize detected strip polygon in configure UI (overlay on preview frames)
+- Visualize detected strip polygon in configure UI
 - Surface `preparation` action type in action timeline / drill report
 - Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
 
-### Priority 4 (Deferred to Stage 3+)
-- Guard/bell guard detection via custom YOLO
-- Color/edge-based visual blade detection
-- ML-based blade tip detection
-- Blade flex physics
-
 ## Commits This Session
 ```
-e74f52f Strip auto-detection: constrain skeleton tracking to piste region
-892fd6c Fencer housekeeping: unique names, delete with full cascade
-099c8e2 Update handoff with P3a+3b completion and branch lineage
-5815e93 Kalman filter + wrist angulation for blade tracking (P3a+3b)
-7246a56 Update handoff with P2c completion and deployment plan
-f90e38b Action-blade integration (P2c): reorder pipeline, preparation detection
-9ecfdcb Update local Claude settings with accumulated tool permissions
+cbc5b62 Fix GPU inference, score normalization, configurable ports, and data paths
+6fa5fc3 Replace YOLO11x-Pose with RTMPose WholeBody (rtmlib)
+6f1505a Add RTMPose migration plan with tracking options and future keypoint ideas
 ```
 
 ## Previous Sessions
+- Session 9: P2c action-blade integration, P3a wrist angulation, P3b Kalman filter, strip detection, fencer housekeeping
 - Session 8: P2a occlusion bridging + P2b confidence score (`296b586`)
 - Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)
 - Session 6: API memory leak, H.264 transcode (`60ca600`, `3248aa9`)
