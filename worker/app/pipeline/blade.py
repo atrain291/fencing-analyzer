@@ -1,25 +1,30 @@
-"""Stage 2 — Heuristic blade tip projection from wrist/elbow keypoints.
+"""Stage 2/3 — Heuristic blade tip projection from wrist/elbow keypoints.
 
 Refinements (Priority 1):
   1a. Persistent weapon arm — determined once from fencer orientation
-  1b. EMA temporal smoothing — reduces tip jitter before velocity calc
+  1b. Temporal smoothing — Kalman filter (replaced EMA in Priority 3b)
   1c. Fixed blade length — calibrated from max arm extension, constant for bout
 
 Refinements (Priority 2):
-  2a. Occlusion bridging — linear interpolation across short gaps (<= 5 frames)
-      instead of resetting all state when confidence drops
+  2a. Occlusion bridging — Kalman predict-only coasting during gaps
+      (replaced linear interpolation in Priority 3b)
   2b. Composite confidence score (0.0-1.0) per frame: keypoint + temporal + extension
+
+Refinements (Priority 3):
+  3a. Wrist angulation correction — deflects blade toward opponent based on arm extension
+  3b. Kalman filter — 4-state [x, y, vx, vy] replaces EMA + manual velocity + gap interp
 """
 import math
 import logging
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 _CONF_THRESHOLD = 0.3
 _BATCH_SIZE = 300
-_EMA_ALPHA = 0.4  # smoothing factor: lower = smoother, higher = more responsive
 _BLADE_ARM_RATIO = 1.5  # 90cm blade / ~60cm arm
-_MAX_GAP_FRAMES = 5  # max gap to interpolate across (~150ms at 30fps)
+_MAX_GAP_FRAMES = 5  # max gap to coast through before resetting Kalman state
 
 # Confidence weights
 _KP_WEIGHT = 0.4
@@ -27,14 +32,96 @@ _TEMPORAL_WEIGHT = 0.4
 _EXTENSION_WEIGHT = 0.2
 _MAX_EXPECTED_JUMP = 0.15  # 15% of frame diagonal
 
+# Kalman filter parameters
+_KF_PROCESS_NOISE = 50.0   # high: blade tips accelerate fast
+_KF_MEASUREMENT_NOISE = 0.001  # ~3% frame diagonal std dev
+
+# Wrist angulation parameters (Priority 3a)
+_MIN_DEFLECTION_DEG = 5.0    # at rest / en garde
+_MAX_DEFLECTION_DEG = 25.0   # at full extension
+_EXT_RATIO_LOW = 0.55        # below this, use min deflection
+_EXT_RATIO_HIGH = 0.95       # above this, use max deflection
+_DEFLECTION_CURVE = 1.4      # exponential ramp
+
+
+class BladeKalmanFilter:
+    """2D Kalman filter for blade tip tracking.
+
+    State: [x, y, vx, vy]
+    Measurement: [x, y]
+    """
+
+    def __init__(self, q: float = _KF_PROCESS_NOISE, r: float = _KF_MEASUREMENT_NOISE):
+        self.q = q
+        self.r_base = r
+        self.x = np.zeros(4)
+        self.P = np.eye(4) * 1.0
+        self.H = np.zeros((2, 4))
+        self.H[0, 0] = 1.0
+        self.H[1, 1] = 1.0
+        self.initialized = False
+
+    def init_state(self, x: float, y: float):
+        self.x = np.array([x, y, 0.0, 0.0])
+        self.P = np.diag([0.001, 0.001, 1.0, 1.0])
+        self.initialized = True
+
+    def predict(self, dt: float):
+        if not self.initialized:
+            return
+        F = np.eye(4)
+        F[0, 2] = dt
+        F[1, 3] = dt
+
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        Q = np.array([
+            [dt3 / 3, 0, dt2 / 2, 0],
+            [0, dt3 / 3, 0, dt2 / 2],
+            [dt2 / 2, 0, dt, 0],
+            [0, dt2 / 2, 0, dt],
+        ]) * self.q
+
+        self.x = F @ self.x
+        self.P = F @ self.P @ F.T + Q
+
+    def update(self, z_x: float, z_y: float, confidence: float = 1.0):
+        if not self.initialized:
+            self.init_state(z_x, z_y)
+            return
+
+        z = np.array([z_x, z_y])
+        scale = self.r_base / max(confidence, 0.1)
+        R = np.eye(2) * scale
+
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        self.x = self.x + K @ y
+        I_KH = np.eye(4) - K @ self.H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+
+    @property
+    def position(self) -> tuple[float, float]:
+        return float(self.x[0]), float(self.x[1])
+
+    @property
+    def velocity(self) -> tuple[float, float]:
+        return float(self.x[2]), float(self.x[3])
+
+    @property
+    def speed(self) -> float:
+        return float(math.sqrt(self.x[2] ** 2 + self.x[3] ** 2))
+
+    def reset(self):
+        self.x = np.zeros(4)
+        self.P = np.eye(4) * 1.0
+        self.initialized = False
+
 
 def _determine_weapon_arm(frames: list, orientation: str) -> str:
-    """
-    Determine weapon arm from fencer orientation.
-
-    Checks which COCO wrist keypoint is more consistently extended toward
-    the opponent across the first 100 frames.
-    """
+    """Determine weapon arm from fencer orientation."""
     right_forward = 0
     left_forward = 0
     for frame in frames[:100]:
@@ -46,13 +133,11 @@ def _determine_weapon_arm(frames: list, orientation: str) -> str:
         if rw.get("confidence", 0) < _CONF_THRESHOLD or lw.get("confidence", 0) < _CONF_THRESHOLD:
             continue
         if orientation == "right":
-            # Facing screen-right: weapon arm extends rightward (higher x)
             if rw["x"] > lw["x"]:
                 right_forward += 1
             else:
                 left_forward += 1
         else:
-            # Facing screen-left: weapon arm extends leftward (lower x)
             if rw["x"] < lw["x"]:
                 right_forward += 1
             else:
@@ -65,13 +150,7 @@ def _determine_weapon_arm(frames: list, orientation: str) -> str:
 
 
 def _calibrate_blade_length(frames: list, weapon: str, ar: float) -> float:
-    """
-    Measure blade length from the maximum observed arm extension.
-
-    Scans frames for the longest shoulder->wrist distance and multiplies
-    by _BLADE_ARM_RATIO. This gives a physically consistent blade length
-    (real epee is always 90cm regardless of arm position).
-    """
+    """Measure blade length from the maximum observed arm extension."""
     max_arm_len = 0.0
     samples = 0
 
@@ -95,7 +174,7 @@ def _calibrate_blade_length(frames: list, weapon: str, ar: float) -> float:
         samples += 1
 
     if max_arm_len < 0.01:
-        blade_length = 0.3 * _BLADE_ARM_RATIO  # fallback
+        blade_length = 0.3 * _BLADE_ARM_RATIO
         logger.warning("Blade calibration: no valid arm measurements, using fallback %.3f", blade_length)
     else:
         blade_length = max_arm_len * _BLADE_ARM_RATIO
@@ -105,14 +184,79 @@ def _calibrate_blade_length(frames: list, weapon: str, ar: float) -> float:
     return blade_length
 
 
+def _compute_wrist_angulation(pose: dict, weapon: str, ar: float,
+                              orientation: str) -> float:
+    """
+    Compute wrist angulation angle (radians) based on arm extension ratio.
+
+    Returns a signed angle to rotate the blade direction vector. The blade
+    deflects toward the opponent (inward) proportional to arm extension.
+    Higher extension → more angulation (epee fencers aim with the wrist).
+    """
+    shoulder = pose.get(f"{weapon}_shoulder", {})
+    elbow = pose.get(f"{weapon}_elbow", {})
+    wrist = pose.get(f"{weapon}_wrist", {})
+
+    if (shoulder.get("confidence", 0) < _CONF_THRESHOLD
+            or elbow.get("confidence", 0) < _CONF_THRESHOLD
+            or wrist.get("confidence", 0) < _CONF_THRESHOLD):
+        return 0.0
+
+    sx, sy = shoulder["x"], shoulder["y"]
+    ex, ey = elbow["x"], elbow["y"]
+    wx, wy = wrist["x"], wrist["y"]
+
+    # Compute arm extension ratio in AR-corrected space
+    d_se = math.sqrt(((ex - sx) * ar) ** 2 + (ey - sy) ** 2)
+    d_ew = math.sqrt(((wx - ex) * ar) ** 2 + (wy - ey) ** 2)
+    d_sw = math.sqrt(((wx - sx) * ar) ** 2 + (wy - sy) ** 2)
+
+    segment_sum = d_se + d_ew
+    if segment_sum < 1e-6:
+        return 0.0
+
+    extension_ratio = d_sw / segment_sum
+
+    # Map extension to deflection angle with exponential ramp
+    t = (extension_ratio - _EXT_RATIO_LOW) / (_EXT_RATIO_HIGH - _EXT_RATIO_LOW)
+    t = max(0.0, min(1.0, t))
+    t_curved = t ** _DEFLECTION_CURVE
+
+    deflection_deg = _MIN_DEFLECTION_DEG + t_curved * (_MAX_DEFLECTION_DEG - _MIN_DEFLECTION_DEG)
+
+    # Determine deflection direction (sign): toward opponent
+    # Forearm direction vector (elbow→wrist)
+    forearm_dx = (wx - ex) * ar
+    forearm_dy = wy - ey
+
+    # Opponent is to the left if facing right, to the right if facing left.
+    # We want to deflect the blade DOWNWARD toward the opponent's body center.
+    # In epee, the default angulation is slightly downward from the forearm
+    # axis (toward opponent's wrist/torso which is typically at or below arm height).
+    #
+    # Use opponent skeleton if available, otherwise use a fixed inward+downward bias.
+    # For now: deflect toward the opponent side (inward).
+    # Cross product of forearm_dir with "down" vector gives the sign.
+    # Facing right: opponent is to the right (higher x in screen), deflect clockwise (negative angle)
+    # Facing left: opponent is to the left (lower x in screen), deflect counter-clockwise (positive angle)
+    if orientation == "right":
+        sign = -1.0  # clockwise rotation = blade tip moves downward/inward
+    else:
+        sign = 1.0
+
+    return sign * math.radians(deflection_deg)
+
+
 def _compute_raw_tip(pose: dict, weapon: str, ar: float,
-                     blade_scale: float) -> tuple[float, float, float, float] | None:
+                     blade_scale: float, orientation: str) -> tuple[float, float, float, float] | None:
     """
     Compute raw (unsmoothed) blade tip from wrist/elbow keypoints.
 
+    Includes wrist angulation correction (Priority 3a): the blade direction
+    is rotated toward the opponent based on arm extension ratio.
+
     Returns (tip_x, tip_y, wrist_conf, elbow_conf) in normalised coordinates,
-    or None if keypoints are below confidence threshold or the direction vector
-    is degenerate.
+    or None if keypoints are below confidence threshold.
     """
     wrist = pose.get(f"{weapon}_wrist", {})
     elbow = pose.get(f"{weapon}_elbow", {})
@@ -135,52 +279,17 @@ def _compute_raw_tip(pose: dict, weapon: str, ar: float,
     dx /= mag
     dy /= mag
 
+    # 3a. Wrist angulation correction
+    angulation = _compute_wrist_angulation(pose, weapon, ar, orientation)
+    if angulation != 0.0:
+        cos_a = math.cos(angulation)
+        sin_a = math.sin(angulation)
+        dx, dy = dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
+
     # Project tip from wrist along blade direction (fixed length)
     tip_x = wx + (dx / ar) * blade_scale
     tip_y = wy + dy * blade_scale
     return (tip_x, tip_y, wrist_conf, elbow_conf)
-
-
-def _interpolate_gap(last_tip: tuple[float, float], last_ts: int,
-                     next_tip: tuple[float, float], next_ts: int,
-                     gap_frames: list, db) -> None:
-    """
-    Linearly interpolate blade tip across buffered gap frames and write
-    BladeState records. Velocity is computed from interpolated positions.
-
-    gap_frames is a list of Frame ORM objects buffered during the gap.
-    """
-    from app.models.analysis import BladeState
-
-    total_steps = len(gap_frames) + 1  # +1 for the next valid frame
-    prev_x, prev_y = last_tip
-    prev_ts = last_ts
-
-    for i, gap_frame in enumerate(gap_frames):
-        t = (i + 1) / total_steps  # interpolation parameter (0, 1)
-        interp_x = last_tip[0] + t * (next_tip[0] - last_tip[0])
-        interp_y = last_tip[1] + t * (next_tip[1] - last_tip[1])
-
-        ts = gap_frame.timestamp_ms
-        dt = (ts - prev_ts) / 1000.0
-        if dt > 0:
-            vel_x = (interp_x - prev_x) / dt
-            vel_y = (interp_y - prev_y) / dt
-            speed = math.sqrt(vel_x * vel_x + vel_y * vel_y)
-        else:
-            vel_x, vel_y, speed = 0.0, 0.0, 0.0
-
-        blade = BladeState(
-            frame_id=gap_frame.id,
-            tip_xyz={"x": interp_x, "y": interp_y, "z": 0.0},
-            nominal_xyz={"x": interp_x, "y": interp_y, "z": 0.0},
-            velocity_xyz={"x": vel_x, "y": vel_y, "z": 0.0},
-            speed=speed,
-        )
-        db.add(blade)
-
-        prev_x, prev_y = interp_x, interp_y
-        prev_ts = ts
 
 
 def run_blade_tracking(frames: list, video_info: dict, db,
@@ -188,12 +297,10 @@ def run_blade_tracking(frames: list, video_info: dict, db,
     """
     Compute nominal blade tip position for each frame using wrist-elbow geometry.
 
-    Blade direction = elbow->wrist vector (normalized).
-    Blade length = fixed, calibrated from max arm extension x 1.5.
-    Tip position is EMA-smoothed before velocity calculation.
-
-    Priority 2a: short gaps (< _MAX_GAP_FRAMES) where keypoint confidence
-    drops are bridged via linear interpolation instead of resetting state.
+    Priority 3a: wrist angulation correction rotates blade toward opponent.
+    Priority 3b: Kalman filter [x, y, vx, vy] replaces EMA smoothing,
+    handles occlusion by coasting on velocity (predict-only), and provides
+    velocity estimates directly (no finite differencing).
     """
     from app.models.analysis import BladeState
 
@@ -206,93 +313,79 @@ def run_blade_tracking(frames: list, video_info: dict, db,
 
     # 1c. Fixed blade length from calibration
     blade_scale = _calibrate_blade_length(frames, weapon, ar)
+    calibrated_max_arm = blade_scale / _BLADE_ARM_RATIO
 
-    # EMA state
-    smooth_x: float | None = None
-    smooth_y: float | None = None
-    prev_smooth_x: float | None = None
-    prev_smooth_y: float | None = None
+    # 3b. Kalman filter state
+    kf = BladeKalmanFilter()
     prev_ts: int | None = None
-
-    # Occlusion bridging state
-    last_valid_tip: tuple[float, float] | None = None  # last smoothed tip
-    last_valid_ts: int | None = None
-    gap_frames: list = []  # buffered frames during a gap
+    gap_count = 0
 
     # Confidence state
     prev_raw_tip_x: float | None = None
     prev_raw_tip_y: float | None = None
 
     processed = 0
-    interpolated = 0
+    coasted = 0
 
     for frame in frames:
         pose = frame.fencer_pose
+        ts = frame.timestamp_ms
+
+        # Compute dt
+        if prev_ts is not None:
+            dt = (ts - prev_ts) / 1000.0
+            if dt <= 0:
+                dt = 1.0 / 30.0
+        else:
+            dt = 1.0 / 30.0
+
         raw_tip = None
         if pose:
-            raw_tip = _compute_raw_tip(pose, weapon, ar, blade_scale)
+            raw_tip = _compute_raw_tip(pose, weapon, ar, blade_scale, orientation)
 
         if raw_tip is None:
-            # --- No valid tip for this frame ---
-            if last_valid_tip is not None:
-                # We have prior state — buffer this frame for potential interpolation
-                gap_frames.append(frame)
-                if len(gap_frames) > _MAX_GAP_FRAMES:
-                    # Gap too long — abandon buffered frames, reset state
-                    logger.debug("Blade gap exceeded %d frames at ts=%d, resetting",
-                                 _MAX_GAP_FRAMES, frame.timestamp_ms)
-                    gap_frames.clear()
-                    smooth_x = None
-                    smooth_y = None
-                    prev_smooth_x = None
-                    prev_smooth_y = None
-                    prev_ts = None
-                    last_valid_tip = None
-                    last_valid_ts = None
-                    prev_raw_tip_x = None
-                    prev_raw_tip_y = None
-            # else: no prior state, nothing to buffer
+            # --- No valid measurement ---
+            if not kf.initialized:
+                prev_ts = ts
+                continue
+
+            gap_count += 1
+            if gap_count > _MAX_GAP_FRAMES:
+                # Gap too long — reset Kalman state
+                logger.debug("Blade gap exceeded %d frames at ts=%d, resetting Kalman",
+                             _MAX_GAP_FRAMES, ts)
+                kf.reset()
+                gap_count = 0
+                prev_raw_tip_x = None
+                prev_raw_tip_y = None
+                prev_ts = ts
+                continue
+
+            # Coast: predict-only step (no measurement update)
+            kf.predict(dt)
+            smooth_x, smooth_y = kf.position
+            vel_x, vel_y = kf.velocity
+
+            blade = BladeState(
+                frame_id=frame.id,
+                tip_xyz={"x": smooth_x, "y": smooth_y, "z": 0.0},
+                nominal_xyz={"x": smooth_x, "y": smooth_y, "z": 0.0},
+                velocity_xyz={"x": vel_x, "y": vel_y, "z": 0.0},
+                speed=kf.speed,
+                # No confidence for coasted frames (same as old interpolation behavior)
+            )
+            db.add(blade)
+            coasted += 1
+            processed += 1
+            prev_ts = ts
+
+            if processed % _BATCH_SIZE == 0:
+                db.commit()
             continue
 
-        # --- Valid tip for this frame ---
+        # --- Valid measurement ---
         raw_tip_x, raw_tip_y, wrist_conf, elbow_conf = raw_tip
-
-        # Check if we need to backfill a gap
-        if gap_frames:
-            # We have buffered gap frames — interpolate them
-            gap_count = len(gap_frames)
-            last_gap_ts = gap_frames[-1].timestamp_ms
-
-            _interpolate_gap(
-                last_valid_tip, last_valid_ts,
-                raw_tip, frame.timestamp_ms,
-                gap_frames, db,
-            )
-            interpolated += gap_count
-            processed += gap_count
-            logger.debug("Blade gap bridged: %d frames interpolated ending at ts=%d",
-                         gap_count, frame.timestamp_ms)
-            gap_frames.clear()
-
-            # Resume EMA from the last interpolated position to avoid
-            # a discontinuity. The last interpolated point sits at
-            # t = gap_count / (gap_count + 1) along the interpolation line.
-            t = gap_count / (gap_count + 1)
-            smooth_x = last_valid_tip[0] + t * (raw_tip_x - last_valid_tip[0])
-            smooth_y = last_valid_tip[1] + t * (raw_tip_y - last_valid_tip[1])
-            prev_smooth_x = smooth_x
-            prev_smooth_y = smooth_y
-            prev_ts = last_gap_ts
-
-        # 1b. EMA smoothing
-        if smooth_x is None:
-            smooth_x = raw_tip_x
-            smooth_y = raw_tip_y
-        else:
-            smooth_x = _EMA_ALPHA * raw_tip_x + (1 - _EMA_ALPHA) * smooth_x
-            smooth_y = _EMA_ALPHA * raw_tip_y + (1 - _EMA_ALPHA) * smooth_y
-
-        tip_xyz = {"x": smooth_x, "y": smooth_y, "z": 0.0}
+        gap_count = 0
 
         # 2b. Composite confidence score
         kp_conf = min(wrist_conf, elbow_conf)
@@ -305,14 +398,16 @@ def run_blade_tracking(frames: list, video_info: dict, db,
         else:
             temporal_conf = 1.0
 
-        wrist_kp = pose.get(f"{weapon}_wrist", {})
-        shoulder = pose.get(f"{weapon}_shoulder", {})
-        if shoulder.get("confidence", 0) >= _CONF_THRESHOLD:
-            arm_dx_ext = (wrist_kp["x"] - shoulder["x"]) * ar
-            arm_dy_ext = wrist_kp["y"] - shoulder["y"]
-            current_arm_len = math.sqrt(arm_dx_ext * arm_dx_ext + arm_dy_ext * arm_dy_ext)
-            calibrated_max_arm = blade_scale / _BLADE_ARM_RATIO
-            extension_conf = min(current_arm_len / calibrated_max_arm, 1.0) if calibrated_max_arm > 0 else 0.5
+        if pose:
+            wrist_kp = pose.get(f"{weapon}_wrist", {})
+            shoulder = pose.get(f"{weapon}_shoulder", {})
+            if shoulder.get("confidence", 0) >= _CONF_THRESHOLD:
+                arm_dx_ext = (wrist_kp["x"] - shoulder["x"]) * ar
+                arm_dy_ext = wrist_kp["y"] - shoulder["y"]
+                current_arm_len = math.sqrt(arm_dx_ext * arm_dx_ext + arm_dy_ext * arm_dy_ext)
+                extension_conf = min(current_arm_len / calibrated_max_arm, 1.0) if calibrated_max_arm > 0 else 0.5
+            else:
+                extension_conf = 0.5
         else:
             extension_conf = 0.5
 
@@ -325,37 +420,24 @@ def run_blade_tracking(frames: list, video_info: dict, db,
         prev_raw_tip_x = raw_tip_x
         prev_raw_tip_y = raw_tip_y
 
-        # Velocity from smoothed positions
-        ts = frame.timestamp_ms
-        if prev_smooth_x is not None and prev_ts is not None:
-            dt = (ts - prev_ts) / 1000.0
-            if dt > 0:
-                vel_x = (smooth_x - prev_smooth_x) / dt
-                vel_y = (smooth_y - prev_smooth_y) / dt
-                speed = math.sqrt(vel_x * vel_x + vel_y * vel_y)
-                velocity_xyz = {"x": vel_x, "y": vel_y, "z": 0.0}
-            else:
-                velocity_xyz = {"x": 0.0, "y": 0.0, "z": 0.0}
-                speed = 0.0
-        else:
-            velocity_xyz = {"x": 0.0, "y": 0.0, "z": 0.0}
-            speed = 0.0
+        # 3b. Kalman predict + update
+        kf.predict(dt)
+        kf.update(raw_tip_x, raw_tip_y, blade_confidence)
+
+        smooth_x, smooth_y = kf.position
+        vel_x, vel_y = kf.velocity
 
         blade = BladeState(
             frame_id=frame.id,
-            tip_xyz=tip_xyz,
+            tip_xyz={"x": smooth_x, "y": smooth_y, "z": 0.0},
             nominal_xyz={"x": raw_tip_x, "y": raw_tip_y, "z": 0.0},
-            velocity_xyz=velocity_xyz,
-            speed=speed,
+            velocity_xyz={"x": vel_x, "y": vel_y, "z": 0.0},
+            speed=kf.speed,
             confidence=blade_confidence,
         )
         db.add(blade)
 
-        prev_smooth_x = smooth_x
-        prev_smooth_y = smooth_y
         prev_ts = ts
-        last_valid_tip = (smooth_x, smooth_y)
-        last_valid_ts = ts
         processed += 1
 
         if processed % _BATCH_SIZE == 0:
@@ -363,5 +445,5 @@ def run_blade_tracking(frames: list, video_info: dict, db,
             logger.debug("Blade tracking: committed %d frames", processed)
 
     db.commit()
-    logger.info("Blade tracking complete: %d frames with blade state (%d interpolated)",
-                processed, interpolated)
+    logger.info("Blade tracking complete: %d frames with blade state (%d coasted)",
+                processed, coasted)
