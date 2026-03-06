@@ -1,64 +1,56 @@
-# Session 8 Handoff — 2026-03-05
+# Session 9 Handoff — 2026-03-05
 
 ## What Was Done
 
-### Priority 2a — Occlusion Bridging (COMPLETE)
-- **Commit**: `296b586`
-- Extracted `_compute_raw_tip()` helper from inline keypoint logic
-- Added `_interpolate_gap()` — linearly interpolates tip across buffered gap frames
-- Gaps <= 5 frames (~150ms at 30fps) get bridged with BladeState records written to DB
-- Gaps > 5 frames reset all state (same as before)
-- EMA resumes from last interpolated position to avoid discontinuity
-- Interpolated frames get velocity computed from interpolated positions
+### Priority 2c — Action-Blade Integration (COMPLETE)
+- **Commit**: `f90e38b`
+- **Branch**: `feature/stage-2c-action-blade-integration` (branched from `feature/stage-2-blade-detection`)
+- Extracted `detect_orientation()` to new `worker/app/pipeline/orientation.py` (shared utility)
+- Reordered pipeline: blade tracking now runs BEFORE action classification
+- `run_action_classification()` accepts optional `blade_speeds` dict — backward compatible
+- Pipeline queries BladeState rows after blade tracking, passes to action classification
+- New **"preparation"** action type: forward foot movement (lunge/advance thresholds) + blade speed < 0.15 = preparation, not attack
+- Blade confidence blending for lunge/fleche: 70% foot-based + 30% blade speed factor
+- Actions enriched with `blade_speed_avg` and `blade_speed_peak` per action window
+- New columns on Action model (both worker + backend) + Pydantic schema updated
+- Alembic migration `d5e6f7a8b9c0` for new Action columns
 
-### Priority 2b — Blade Confidence Score (COMPLETE)
-- **Commit**: `296b586`
-- New Alembic migration: `c4d5e6f7a8b9_add_confidence_to_blade_states.py`
-- `confidence` column added to BladeState in both worker and backend models
-- Composite score: keypoint conf (40%) + temporal consistency (40%) + arm extension (20%)
-- Frontend: blade/trail opacity modulates by confidence (0.3-0.85 range)
-- "Blade Conf" percentage readout added to frame data panel
-- `interpolateBladeState()` now interpolates confidence between frames
-- Fixed pre-existing: missing `z` in Keypoint interpolation, unused `GripHorizontal` import
-
-### Deployment Steps Required
-1. Run migration: `alembic upgrade head` (inside api container or with DB access)
+### Deployment Steps Required (P2a + P2b + P2c combined)
+1. Run migrations: `alembic upgrade head` (two pending: `c4d5e6f7a8b9`, `d5e6f7a8b9c0`)
 2. Rebuild frontend: `podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/`
 3. Restart services: `podman-compose down && podman-compose up -d --no-build`
-4. Worker picks up blade.py changes via volume mount on restart (no rebuild needed)
-5. Re-process a bout to populate confidence data
+4. Worker picks up Python changes via volume mount on restart (no rebuild needed)
+5. Re-process a bout to populate confidence + blade speed data
 
 ## Current State
-- **Branch**: `feature/stage-2-blade-detection`
-- **Migration pending**: `c4d5e6f7a8b9` (confidence column)
-- **Not yet deployed/tested** — code committed but containers not rebuilt
+- **Branch**: `feature/stage-2c-action-blade-integration`
+- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed on actions)
+- **Not yet deployed/tested** — P2a+2b+2c all committed but containers not rebuilt
+- **Frontend gaps**: does not yet surface preparation action type or blade speed metrics in review UI
 
-## What's Next — Priority 2c: Action Classification Integration
+## What's Next
 
-### Overview
-Feed blade speed into action classification as supplementary signal. Currently `actions.py` is purely ankle-based.
+### Frontend Updates for P2c
+- Surface `preparation` action type in action timeline / drill report
+- Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
+- Color-code or icon for preparation vs attack actions
 
-### Key Design Decision
-Pipeline runs actions BEFORE blade tracking (actions determines orientation for weapon arm). Two options:
-1. **Two-pass**: Extract orientation first (lightweight), run blade tracking, then run full action classification with blade data
-2. **Split `_detect_orientation()`** out of `actions.py` into a shared utility
+### Priority 3 — Blade Detection Refinement
+- **3a** Wrist angulation correction — estimate wrist deflection from shoulder-elbow-wrist angle
+- **3b** Kalman filter — replace EMA with proper Kalman for joint position+velocity estimation
 
-### Implementation Details
-- **Lunge qualification**: Currently `dx_front > 0.45 AND abs(dx_back) < 0.15`. Enhance with blade speed threshold — real attack has blade accelerating forward, not just feet.
-- **Per-action blade metrics**: `blade_speed_avg`, `blade_speed_peak`, `blade_linearity` (direction consistency)
-- **Attack vs preparation**: Foot movement WITHOUT blade acceleration = preparation, not attack
-- **Files**: `actions.py`, `video_pipeline.py` (reorder stages), optionally extend Action model
-
-### Dependencies
-- 2a (occlusion bridging) provides stable blade speed through gaps — DONE
-- Blade speed values from EMA-smoothed positions — DONE
+### Deploy & Test
+- All three P2 priorities need end-to-end testing before moving to Priority 3
+- Validate preparation detection on real bout footage
+- Check blade speed thresholds are reasonable (0.15 prep, 0.40 attack)
 
 ## Commits This Session
 ```
-296b586 Blade detection Priority 2a+2b: occlusion bridging and confidence score
-606828c Add session 8 handoff: Priority 2 blade detection assessment
+f90e38b Action-blade integration (P2c): reorder pipeline, preparation detection
+9ecfdcb Update local Claude settings with accumulated tool permissions
 ```
 
 ## Previous Sessions
+- Session 8: P2a occlusion bridging + P2b confidence score (`296b586`)
 - Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)
 - Session 6: API memory leak, H.264 transcode (`60ca600`, `3248aa9`)
