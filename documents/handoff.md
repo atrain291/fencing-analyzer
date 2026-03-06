@@ -96,7 +96,7 @@ master
 ## Commits This Session
 ```
 e74f52f Strip auto-detection: constrain skeleton tracking to piste region
-<pending> Fencer housekeeping: unique names, delete with cascade
+892fd6c Fencer housekeeping: unique names, delete with full cascade
 099c8e2 Update handoff with P3a+3b completion and branch lineage
 5815e93 Kalman filter + wrist angulation for blade tracking (P3a+3b)
 7246a56 Update handoff with P2c completion and deployment plan
