@@ -1,4 +1,4 @@
-# Session 10 Handoff — 2026-03-06
+# Session 11 Handoff — 2026-03-08
 
 ## What Was Done
 
@@ -29,10 +29,19 @@
 ### Data Path Fix (COMPLETE)
 - Updated postgres/redis bind mounts from old external drive UUID to `/mnt/data/fencing-data/`
 
+### Per-Fencer Action Timeline (COMPLETE)
+- **Commit**: `9574791` on `feature/stage-3-blade-refinement`
+- Added `subject` column ("fencer" / "opponent") to Action model + Alembic migration `f7a8b9c0d1e2`
+- Refactored `actions.py`: extracted `_classify_subject()` helper, runs on both `fencer_pose` and `opponent_pose`
+- Opponent forward direction inverted (they face opposite to fencer); no blade data for opponent
+- Frontend dual-track timeline: "You" + "Opp" rows with shared legend, tooltip shows subject
+- Drill report scoped to fencer actions only
+- Side panel `activeAction` filtered to fencer only
+
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
 - **All 6 containers running**: frontend(:5173), api(:8000), worker(GPU), postgres(:5432), redis(:6379), ollama(:11434)
-- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
+- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name), `f7a8b9c0d1e2` (action subject)
 - **RTMPose models**: auto-downloaded to `~/.cache/rtmlib/` on first inference
 - **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics
 
@@ -68,12 +77,16 @@ master
 
 ## Commits This Session
 ```
+9574791 Add per-fencer action timeline with opponent tracking
+940a064 Make project fully self-contained for multi-project coexistence
+a042c00 Update handoff for session 10: RTMPose migration and GPU fixes
 cbc5b62 Fix GPU inference, score normalization, configurable ports, and data paths
 6fa5fc3 Replace YOLO11x-Pose with RTMPose WholeBody (rtmlib)
 6f1505a Add RTMPose migration plan with tracking options and future keypoint ideas
 ```
 
 ## Previous Sessions
+- Session 10: RTMPose migration, GPU fix, configurable ports, self-contained project, per-fencer timeline
 - Session 9: P2c action-blade integration, P3a wrist angulation, P3b Kalman filter, strip detection, fencer housekeeping
 - Session 8: P2a occlusion bridging + P2b confidence score (`296b586`)
 - Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)
