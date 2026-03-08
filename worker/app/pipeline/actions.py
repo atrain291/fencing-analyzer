@@ -36,10 +36,7 @@ def run_action_classification(bout_id: int, frames: list, db,
                               blade_speeds: dict[int, dict] | None = None) -> list[dict]:
     """
     Classify fencing actions from per-frame ankle positions and blade speed.
-
-    blade_speeds: optional dict mapping frame_id -> {"speed": float, "confidence": float | None}
-                  from BladeState rows. When provided, blade speed enriches lunge/fleche
-                  detection and enables preparation classification.
+    Runs classification for both fencer and opponent poses.
 
     Returns a list of action dicts and writes Action records to the DB.
     """
@@ -49,20 +46,65 @@ def run_action_classification(bout_id: int, frames: list, db,
 
     # Build a timestamp->blade_speed lookup if blade data is available
     blade_by_ts: dict[int, float] = {}
-    blade_conf_by_ts: dict[int, float] = {}
     if blade_speeds:
         for frame in frames:
             bs = blade_speeds.get(frame.id)
             if bs and bs.get("speed") is not None:
                 blade_by_ts[frame.timestamp_ms] = bs["speed"]
-                blade_conf_by_ts[frame.timestamp_ms] = bs.get("confidence") or 0.0
 
+    all_actions = []
+
+    # Classify fencer actions
+    fencer_actions = _classify_subject(frames, orientation, blade_by_ts, pose_key="fencer_pose")
+    for a in fencer_actions:
+        a["subject"] = "fencer"
+    all_actions.extend(fencer_actions)
+
+    # Classify opponent actions (no blade data for opponent)
+    opponent_actions = _classify_subject(frames, orientation, blade_by_ts={}, pose_key="opponent_pose")
+    for a in opponent_actions:
+        a["subject"] = "opponent"
+    all_actions.extend(opponent_actions)
+
+    # Write Action records to DB
+    for a in all_actions:
+        action = Action(
+            bout_id=bout_id,
+            subject=a["subject"],
+            type=a["type"],
+            start_ms=a["start_ms"],
+            end_ms=a["end_ms"],
+            outcome=None,
+            confidence=a["confidence"],
+            blade_speed_avg=a.get("blade_speed_avg"),
+            blade_speed_peak=a.get("blade_speed_peak"),
+        )
+        db.add(action)
+
+    db.commit()
+    logger.info("Action classification complete: %d fencer + %d opponent actions",
+                len(fencer_actions), len(opponent_actions))
+    return all_actions
+
+
+def _classify_subject(frames: list, orientation: str,
+                      blade_by_ts: dict[int, float],
+                      pose_key: str) -> list[dict]:
+    """Classify actions for a single subject (fencer or opponent) from their pose data."""
     has_blade = len(blade_by_ts) > 0
+
+    # Determine forward sign — opponent faces opposite direction
+    if pose_key == "opponent_pose":
+        fwd_sign = 1.0 if orientation == "right" else -1.0
+    else:
+        fwd_sign = -1.0 if orientation == "right" else 1.0
 
     # Build position timeline from frames with valid ankle keypoints
     timeline = []
     for frame in frames:
-        pose = frame.fencer_pose
+        pose = getattr(frame, pose_key, None) if hasattr(frame, pose_key) else frame.get(pose_key) if isinstance(frame, dict) else None
+        if pose is None:
+            pose = getattr(frame, pose_key, None)
         if not pose:
             continue
 
@@ -114,14 +156,11 @@ def run_action_classification(bout_id: int, frames: list, db,
         })
 
     if len(timeline) < 5:
-        logger.info("Action classification: too few frames (%d), skipping", len(timeline))
         return []
 
     baseline_stance = sum(t["stance_width"] for t in timeline[:10]) / min(10, len(timeline))
     if baseline_stance < 0.01:
         baseline_stance = 0.05
-
-    fwd_sign = -1.0 if orientation == "right" else 1.0
 
     # Sliding window classification
     raw_actions: list[dict] = []
@@ -169,7 +208,6 @@ def run_action_classification(bout_id: int, frames: list, db,
         # 2. Lunge: front foot extends fast, back foot stays still
         elif dx_front > _LUNGE_FRONT_THRESHOLD and abs(dx_back) < _LUNGE_BACK_THRESHOLD:
             if has_blade and window_blade_speed is not None and window_blade_speed < _BLADE_PREP_THRESHOLD:
-                # Foot says lunge but blade isn't moving — preparation
                 action_type = "preparation"
                 confidence = min(1.0, dx_front / 0.70) * 0.85
             else:
@@ -231,22 +269,6 @@ def run_action_classification(bout_id: int, frames: list, db,
     if has_blade:
         raw_actions = _enrich_with_blade(raw_actions, blade_by_ts)
 
-    # Write Action records to DB
-    for a in raw_actions:
-        action = Action(
-            bout_id=bout_id,
-            type=a["type"],
-            start_ms=a["start_ms"],
-            end_ms=a["end_ms"],
-            outcome=None,
-            confidence=a["confidence"],
-            blade_speed_avg=a.get("blade_speed_avg"),
-            blade_speed_peak=a.get("blade_speed_peak"),
-        )
-        db.add(action)
-
-    db.commit()
-    logger.info("Action classification complete: %d actions detected", len(raw_actions))
     return raw_actions
 
 

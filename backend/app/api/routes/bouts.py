@@ -230,7 +230,7 @@ def get_drill_report(bout_id: int, db: Session = Depends(get_db)):
 
     actions = (
         db.query(Action)
-        .filter(Action.bout_id == bout_id)
+        .filter(Action.bout_id == bout_id, Action.subject == "fencer")
         .order_by(Action.start_ms)
         .all()
     )

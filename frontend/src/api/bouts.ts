@@ -35,6 +35,7 @@ export interface PipelineProgress {
 export interface Action {
   id: number
   bout_id: number
+  subject: string
   type: string
   start_ms: number
   end_ms: number

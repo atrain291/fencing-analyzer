@@ -27,6 +27,7 @@ class ActionRead(BaseModel):
 
     id: int
     bout_id: int
+    subject: str = "fencer"
     type: str
     start_ms: int
     end_ms: int

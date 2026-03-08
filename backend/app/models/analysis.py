@@ -10,6 +10,7 @@ class Action(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     bout_id: Mapped[int] = mapped_column(ForeignKey("bouts.id"))
+    subject: Mapped[str] = mapped_column(String(20), default="fencer")  # "fencer" or "opponent"
     type: Mapped[str] = mapped_column(String(50))  # lunge, advance, parry, etc.
     start_ms: Mapped[int] = mapped_column(Integer)
     end_ms: Mapped[int] = mapped_column(Integer)

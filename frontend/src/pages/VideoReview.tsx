@@ -11,6 +11,7 @@ interface AnalysisSummary {
 
 interface Action {
   id: number
+  subject: string
   type: string
   start_ms: number
   end_ms: number
@@ -447,7 +448,7 @@ export default function VideoReview() {
 
   // Derive the currently active action from video timestamp
   const activeAction = useMemo(() => {
-    return actions.find(a => currentTimeMs >= a.start_ms && currentTimeMs <= a.end_ms) ?? null
+    return actions.find(a => a.subject !== 'opponent' && currentTimeMs >= a.start_ms && currentTimeMs <= a.end_ms) ?? null
   }, [actions, currentTimeMs])
 
   // Speed color coding: green (<1), yellow (1-3), red (>3)
@@ -582,29 +583,15 @@ export default function VideoReview() {
             </div>
           )}
           {/* Action Timeline */}
-          {actions.length > 0 && videoDurationMs > 0 && (
-            <div className="bg-gray-900 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                  Action Timeline
-                </h3>
-                <div className="flex items-center gap-3">
-                  {Object.entries(ACTION_COLORS).map(([type, color]) => (
-                    <div key={type} className="flex items-center gap-1">
-                      <span
-                        className="inline-block w-2.5 h-2.5 rounded-sm"
-                        style={{ backgroundColor: color }}
-                      />
-                      <span className="text-[10px] text-gray-500">
-                        {ACTION_LABELS[type] ?? type}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+          {actions.length > 0 && videoDurationMs > 0 && (() => {
+            const fencerActions = actions.filter(a => a.subject !== 'opponent')
+            const opponentActions = actions.filter(a => a.subject === 'opponent')
+            const hasOpponent = opponentActions.length > 0
+
+            const renderTrack = (trackActions: Action[], label: string, trackRef?: React.RefObject<HTMLDivElement>) => (
               <div
-                ref={timelineRef}
-                className="relative h-8 bg-gray-800 rounded-md cursor-pointer overflow-hidden"
+                ref={trackRef}
+                className="relative h-6 bg-gray-800 rounded-md cursor-pointer overflow-hidden"
                 onClick={(e) => {
                   const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect()
                   const fraction = (e.clientX - rect.left) / rect.width
@@ -614,8 +601,12 @@ export default function VideoReview() {
                   }
                 }}
               >
+                {/* Track label */}
+                <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[9px] font-medium text-gray-500 z-10 pointer-events-none">
+                  {label}
+                </span>
                 {/* Action segments */}
-                {actions.map((action) => {
+                {trackActions.map((action) => {
                   const left = (action.start_ms / videoDurationMs) * 100
                   const width = ((action.end_ms - action.start_ms) / videoDurationMs) * 100
                   const color = ACTION_COLORS[action.type] ?? '#9ca3af'
@@ -652,37 +643,67 @@ export default function VideoReview() {
                   }}
                 />
               </div>
-              {/* Tooltip */}
-              {hoveredAction && (
-                <div
-                  className="fixed z-50 px-2.5 py-1.5 bg-gray-950 border border-gray-700 rounded-md shadow-lg pointer-events-none"
-                  style={{
-                    left: `${tooltipPos.x}px`,
-                    top: `${tooltipPos.y - 8}px`,
-                    transform: 'translate(-50%, -100%)',
-                  }}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className="inline-block w-2 h-2 rounded-sm"
-                      style={{ backgroundColor: ACTION_COLORS[hoveredAction.type] ?? '#9ca3af' }}
-                    />
-                    <span className="text-xs font-medium text-gray-200">
-                      {ACTION_LABELS[hoveredAction.type] ?? hoveredAction.type}
-                    </span>
+            )
+
+            return (
+              <div className="bg-gray-900 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                    Action Timeline
+                  </h3>
+                  <div className="flex items-center gap-3">
+                    {Object.entries(ACTION_COLORS).map(([type, color]) => (
+                      <div key={type} className="flex items-center gap-1">
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-sm"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span className="text-[10px] text-gray-500">
+                          {ACTION_LABELS[type] ?? type}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-0.5">
-                    {formatMs(hoveredAction.start_ms)} — {formatMs(hoveredAction.end_ms)}
-                    {hoveredAction.confidence != null && (
-                      <span className="ml-1.5 text-gray-500">
-                        ({Math.round(hoveredAction.confidence * 100)}%)
-                      </span>
-                    )}
-                  </p>
                 </div>
-              )}
-            </div>
-          )}
+                <div className="space-y-1">
+                  {renderTrack(fencerActions, 'You', timelineRef)}
+                  {hasOpponent && renderTrack(opponentActions, 'Opp')}
+                </div>
+                {/* Tooltip */}
+                {hoveredAction && (
+                  <div
+                    className="fixed z-50 px-2.5 py-1.5 bg-gray-950 border border-gray-700 rounded-md shadow-lg pointer-events-none"
+                    style={{
+                      left: `${tooltipPos.x}px`,
+                      top: `${tooltipPos.y - 8}px`,
+                      transform: 'translate(-50%, -100%)',
+                    }}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="inline-block w-2 h-2 rounded-sm"
+                        style={{ backgroundColor: ACTION_COLORS[hoveredAction.type] ?? '#9ca3af' }}
+                      />
+                      <span className="text-xs font-medium text-gray-200">
+                        {ACTION_LABELS[hoveredAction.type] ?? hoveredAction.type}
+                      </span>
+                      <span className="text-[10px] text-gray-500">
+                        ({hoveredAction.subject === 'opponent' ? 'Opponent' : 'You'})
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {formatMs(hoveredAction.start_ms)} — {formatMs(hoveredAction.end_ms)}
+                      {hoveredAction.confidence != null && (
+                        <span className="ml-1.5 text-gray-500">
+                          ({Math.round(hoveredAction.confidence * 100)}%)
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )
+          })()}
           <div className="flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">Speed</span>
