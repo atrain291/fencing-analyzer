@@ -1,7 +1,8 @@
 import type { Keypoint } from '@/api/bouts'
 
 /**
- * COCO 17-point skeleton connections for drawing pose overlays.
+ * Skeleton connections for drawing pose overlays.
+ * COCO 17-point body + 6 foot keypoints from RTMPose WholeBody.
  * Each tuple is [startJoint, endJoint].
  */
 export const SKELETON_EDGES: [string, string][] = [
@@ -14,6 +15,11 @@ export const SKELETON_EDGES: [string, string][] = [
   ['left_hip', 'right_hip'],
   ['left_hip', 'left_knee'], ['left_knee', 'left_ankle'],
   ['right_hip', 'right_knee'], ['right_knee', 'right_ankle'],
+  // Foot bones (ankle -> heel, ankle -> big toe, big toe -> small toe)
+  ['left_ankle', 'left_heel'], ['left_ankle', 'left_big_toe'],
+  ['left_big_toe', 'left_small_toe'],
+  ['right_ankle', 'right_heel'], ['right_ankle', 'right_big_toe'],
+  ['right_big_toe', 'right_small_toe'],
 ]
 
 /** Minimum keypoint confidence required to draw a joint or edge. */

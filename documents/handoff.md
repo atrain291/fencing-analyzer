@@ -1,4 +1,4 @@
-# Session 11 Handoff — 2026-03-08
+# Session 12 Handoff — 2026-03-09
 
 ## What Was Done
 
@@ -38,12 +38,30 @@
 - Drill report scoped to fencer actions only
 - Side panel `activeAction` filtered to fencer only
 
+### WHAM 3D Mesh Reconstruction (COMPLETE — container built, checkpoints pending)
+- **Commit**: `1c7b6c4` on `feature/stage-3-blade-refinement`
+- Separate container (`fencing-analyzer-wham`) with PyTorch 1.13 + CUDA 11.6 (incompatible with main worker's PyTorch 2.4.1)
+- Fire-and-forget async dispatch from main pipeline after pose estimation
+- Runs per-subject (fencer + opponent separately) — WHAM is single-person model
+- Uses `--estimate_local_only` (no DPVO) — global trajectory from piste homography instead
+- Outputs: SMPL body pose, shape (betas), 3D joint positions (24 SMPL joints), foot contact probabilities
+- New `mesh_states` table + Alembic migration `a8b9c0d1e2f3`
+- Frontend types updated (MeshState interface, mesh_states on Frame)
+- **Pending**: SMPL model files (manual registration at smpl.is.tue.mpg.de) + WHAM checkpoints (gdown rate-limited)
+
+### Foot Keypoints (COMPLETE)
+- Extended `KEYPOINT_NAMES` in `pose.py` from 17 to 23 (added RTMPose indices 17-22: big_toe, small_toe, heel for each foot)
+- Added 6 foot bone edges to `SKELETON_EDGES` in `skeleton.ts` (ankle→heel, ankle→big_toe, big_toe→small_toe)
+- Zero-cost improvement — RTMPose was already detecting these, we were just discarding them
+
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
-- **All 6 containers running**: frontend(:5173), api(:8000), worker(GPU), postgres(:5432), redis(:6379), ollama(:11434)
-- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name), `f7a8b9c0d1e2` (action subject)
+- **All 7 containers running**: frontend(:5174), api(:8001), worker(GPU), wham(GPU), postgres(:5433), redis(:6380), ollama(:11435)
+- **Ports**: alternate ports to coexist with sister project on default ports
+- **Migrations applied**: `f7a8b9c0d1e2` (action subject), `a8b9c0d1e2f3` (mesh_states)
+- **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
 - **RTMPose models**: auto-downloaded to `~/.cache/rtmlib/` on first inference
-- **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics
+- **Frontend gaps**: no strip visualization, no preparation action display, no blade speed metrics, no 3D mesh visualization
 
 ## Branch Lineage
 ```
@@ -55,38 +73,45 @@ master
 
 ## What's Next
 
-### Deploy & Test (HIGH PRIORITY)
-- Run pending Alembic migrations
-- Process a bout end-to-end with RTMPose and verify:
+### WHAM Setup (HIGH PRIORITY)
+- Register at smpl.is.tue.mpg.de and download SMPL body models
+- Place in `wham/dataset/body_models/` per WHAM README
+- Manually download WHAM checkpoints (gdown rate-limited during build)
+- Test WHAM inference end-to-end
+
+### Deploy & Test
+- Process a bout end-to-end and verify:
+  - Foot keypoints render correctly in review UI
+  - Dual-track action timeline shows fencer + opponent
   - GPU utilization during inference
-  - Correct skeleton overlays in review UI
-  - Confidence values in 0-1 range
   - Fencer/opponent tracking stability
-  - Strip detection constraining skeleton selection
-  - Blade tracking, action classification still working
 
 ### Future RTMPose Opportunities (documented in rtmpose_migration.md)
 - Hand keypoints (indices 91-132): improve blade tip detection from grip position
-- Foot keypoints (indices 17-22): more precise footwork analysis
 - Alternative tracking: custom IoU matching or standalone ByteTrack/BoT-SORT
 
 ### Frontend Updates
+- 3D mesh visualization (consume WHAM mesh_states data)
 - Visualize detected strip polygon in configure UI
 - Surface `preparation` action type in action timeline / drill report
 - Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
 
+### Future Research
+- 4D Gaussian splatting for multi-camera fencing replay (Arcturus, 60-90 degree camera separation)
+- `pipeline/homography.py` for strip-based world coordinate correction
+- Populate `kinetic_states` and `threat_metrics` from WHAM 3D data
+
 ## Commits This Session
 ```
+1c7b6c4 Add WHAM 3D mesh reconstruction service
+8b12856 Update handoff for session 11
 9574791 Add per-fencer action timeline with opponent tracking
-940a064 Make project fully self-contained for multi-project coexistence
-a042c00 Update handoff for session 10: RTMPose migration and GPU fixes
-cbc5b62 Fix GPU inference, score normalization, configurable ports, and data paths
-6fa5fc3 Replace YOLO11x-Pose with RTMPose WholeBody (rtmlib)
-6f1505a Add RTMPose migration plan with tracking options and future keypoint ideas
+(+ foot keypoints commit pending)
 ```
 
 ## Previous Sessions
-- Session 10: RTMPose migration, GPU fix, configurable ports, self-contained project, per-fencer timeline
+- Session 11: WHAM 3D mesh reconstruction, foot keypoints, per-fencer action timeline
+- Session 10: RTMPose migration, GPU fix, configurable ports, self-contained project
 - Session 9: P2c action-blade integration, P3a wrist angulation, P3b Kalman filter, strip detection, fencer housekeeping
 - Session 8: P2a occlusion bridging + P2b confidence score (`296b586`)
 - Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)

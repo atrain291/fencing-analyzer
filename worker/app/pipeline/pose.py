@@ -544,12 +544,19 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
     return results_summary
 
 
-# COCO keypoint indices (RTMPose WholeBody first 17 = COCO 17-point skeleton)
+# RTMPose WholeBody keypoint indices:
+#   0-16:  COCO 17-point body skeleton
+#   17-22: 6 foot keypoints (toe/heel detail for footwork analysis)
+#   23-90: 68 face keypoints (not stored)
+#   91-132: 42 hand keypoints (not stored)
 KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
     "left_wrist", "right_wrist", "left_hip", "right_hip",
     "left_knee", "right_knee", "left_ankle", "right_ankle",
+    # Foot keypoints (RTMPose indices 17-22)
+    "left_big_toe", "left_small_toe", "left_heel",
+    "right_big_toe", "right_small_toe", "right_heel",
 ]
 
 
