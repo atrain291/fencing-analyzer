@@ -12,6 +12,16 @@ class BladeStateRead(BaseModel):
     confidence: float | None = None
 
 
+class MeshStateRead(BaseModel):
+    model_config = {"from_attributes": True}
+
+    subject: str
+    joints_3d: dict
+    global_translation: dict | None
+    foot_contact: dict | None
+    confidence: float | None = None
+
+
 class FrameRead(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -20,6 +30,7 @@ class FrameRead(BaseModel):
     fencer_pose: dict
     opponent_pose: dict | None
     blade_state: BladeStateRead | None = None
+    mesh_states: list[MeshStateRead] = []
 
 
 class ActionRead(BaseModel):

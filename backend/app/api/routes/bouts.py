@@ -66,7 +66,7 @@ def get_bout_frames(bout_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Bout not found")
     frames = (
         db.query(Frame)
-        .options(joinedload(Frame.blade_state))
+        .options(joinedload(Frame.blade_state), joinedload(Frame.mesh_states))
         .filter(Frame.bout_id == bout_id)
         .order_by(Frame.timestamp_ms)
         .all()

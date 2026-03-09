@@ -15,12 +15,21 @@ export interface BladeState {
   confidence: number | null
 }
 
+export interface MeshState {
+  subject: string
+  joints_3d: Record<string, { x: number; y: number; z: number }>
+  global_translation: { x: number; y: number; z: number } | null
+  foot_contact: { left_heel: number; left_toe: number; right_heel: number; right_toe: number } | null
+  confidence: number | null
+}
+
 export interface Frame {
   id: number
   timestamp_ms: number
   fencer_pose: Record<string, Keypoint>
   opponent_pose: Record<string, Keypoint> | null
   blade_state: BladeState | null
+  mesh_states: MeshState[]
 }
 
 export interface PipelineProgress {

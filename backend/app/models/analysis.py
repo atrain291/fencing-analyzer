@@ -36,6 +36,7 @@ class Frame(Base):
     blade_state: Mapped["BladeState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
     threat_metrics: Mapped["ThreatMetrics | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
     kinetic_state: Mapped["KineticState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
+    mesh_states: Mapped[list["MeshState"]] = relationship(back_populates="frame", cascade="all, delete-orphan")
 
 
 class BladeState(Base):
@@ -83,6 +84,23 @@ class KineticState(Base):
     recovery_complete: Mapped[bool | None] = mapped_column(Boolean)
 
     frame: Mapped["Frame"] = relationship(back_populates="kinetic_state")
+
+
+class MeshState(Base):
+    __tablename__ = "mesh_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"))
+    subject: Mapped[str] = mapped_column(String(20))  # "fencer" or "opponent"
+    body_pose: Mapped[dict] = mapped_column(JSON)          # 23 joints x 6D rotation (138 floats)
+    global_orient: Mapped[dict] = mapped_column(JSON)      # root 6D rotation (6 floats)
+    betas: Mapped[dict] = mapped_column(JSON)              # shape coefficients (10 floats)
+    joints_3d: Mapped[dict] = mapped_column(JSON)          # {joint_name: {x, y, z}}
+    global_translation: Mapped[dict | None] = mapped_column(JSON)  # {x, y, z} world-space
+    foot_contact: Mapped[dict | None] = mapped_column(JSON)  # {left_heel, left_toe, right_heel, right_toe}
+    confidence: Mapped[float | None] = mapped_column(Float)
+
+    frame: Mapped["Frame"] = relationship(back_populates="mesh_states")
 
 
 class Analysis(Base):

@@ -34,9 +34,39 @@ from app.pipeline.llm import synthesize_coaching_feedback
 
 logger = logging.getLogger(__name__)
 
+
+def _release_gpu():
+    """Release RTMPose model from GPU memory between pipeline stages."""
+    import gc
+    import torch
+    from app.pipeline import pose
+    pose._model = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("GPU memory released (RTMPose unloaded)")
+
+
+def _dispatch_wham(bout_id: int, video_path: str, video_info: dict):
+    """Dispatch WHAM 3D reconstruction to the wham worker queue.
+
+    This is fire-and-forget: the main pipeline continues with blade tracking
+    while WHAM runs asynchronously in a separate container. Results are
+    written directly to the mesh_states table by the WHAM worker.
+    """
+    from celery import Celery
+    wham_app = Celery(broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+    wham_app.send_task(
+        "wham.tasks.run_mesh_reconstruction",
+        args=[bout_id, video_path, video_info],
+        queue="wham_pipeline",
+    )
+
+
 STAGES = [
     "ingest",
     "pose_estimation",
+    "mesh_reconstruction",  # async — WHAM in separate container
     "blade_tracking",
     "action_classification",
     # "llm_synthesis",  # disabled — re-enable when LLM coaching is needed
@@ -121,11 +151,22 @@ def run_pipeline(self, bout_id: int, video_path: str):
                                                strip=strip)
             logger.info("Pose estimation complete: %d frames", len(pose_results))
 
+            # Release RTMPose from GPU before downstream stages
+            _release_gpu()
+
             # Load frame ORM objects for downstream stages
             frames = (db.query(Frame)
                       .filter(Frame.bout_id == bout_id)
                       .order_by(Frame.timestamp_ms)
                       .all())
+
+            # Stage 2.5 — WHAM 3D mesh reconstruction (async, separate container)
+            _update_progress(bout_id, "mesh_reconstruction", 81, db)
+            try:
+                _dispatch_wham(bout_id, video_path, video_info)
+                logger.info("WHAM task dispatched for bout %d", bout_id)
+            except Exception:
+                logger.warning("WHAM dispatch failed — continuing without 3D data", exc_info=True)
 
             # Stage 3 — Blade tracking (orientation needed, runs before actions)
             _update_progress(bout_id, "blade_tracking", 83, db)

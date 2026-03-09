@@ -15,9 +15,11 @@ All services run in Podman containers via podman-compose.
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-api backend/
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-frontend frontend/
 podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-worker worker/
+podman build --security-opt seccomp=unconfined --security-opt label=disable -t fencing-analyzer-wham wham/
 # Worker rebuild required after RTMPose migration (new deps: rtmlib, onnxruntime-gpu)
+# WHAM container requires SMPL model files — see wham/Dockerfile comments
 
-# Start all services (6 containers: frontend, api, worker, postgres, redis, ollama)
+# Start all services (7 containers: frontend, api, worker, wham, postgres, redis, ollama)
 podman-compose up -d --no-build
 
 # Full restart (required after code changes to worker — kills in-progress tasks)
@@ -38,15 +40,17 @@ There is no test suite configured. Validation is done via manual E2E testing and
 
 ## Architecture
 
-**Three-tier containerized system:**
+**Multi-service containerized system (7 containers):**
 
 ```
 Frontend (React 18 + Vite, :5173)
     ↓ /api proxy (vite.config.ts, 600s timeout)
 Backend API (FastAPI, :8000)
     ↓ Celery dispatch
-Worker (RTMPose + FFmpeg, GPU)
-    ↓ reads/writes
+Worker (RTMPose + FFmpeg, GPU)          ← 2D pose, blade, actions
+    ↓ dispatches async
+WHAM Worker (PyTorch 1.13, GPU)         ← 3D mesh reconstruction (separate container/CUDA stack)
+    ↓ both read/write
 PostgreSQL 16 + Redis 7
 ```
 
@@ -78,11 +82,20 @@ Celery worker processing one video at a time (`worker_prefetch_multiplier=1`).
 
 **Preview task** (`tasks/preview.py`): extracts 5 frames with RTMPose WholeBody for skeleton selection UI.
 
+### WHAM Worker (`wham/app/`)
+Separate Celery worker running WHAM (World-grounded Humans with Accurate Motion) for 3D body mesh reconstruction. Runs in its own container with PyTorch 1.13 + CUDA 11.6 (incompatible with main worker's PyTorch 2.4.1).
+
+- Dispatched async by main pipeline after pose estimation
+- Reads 2D poses from `frames` table, writes `mesh_states` rows
+- Runs per-subject (fencer + opponent separately) — WHAM is single-person
+- Uses `--estimate_local_only` (no DPVO) — global trajectory from piste homography instead
+- Outputs: SMPL body pose, shape, 3D joint positions, foot contact probabilities
+
 ### Bout Status Flow
 `configuring` → `previewing` → `preview_ready` → `queued` → `processing` → `complete` / `failed`
 
-### Database (9 tables)
-Core: `fencers`, `sessions`, `bouts` (with `preview_data`, `fencer_bbox`, `opponent_bbox`, `pipeline_progress` JSON columns), `frames` (with `fencer_pose`/`opponent_pose` JSON), `actions`, `blade_states`, `analyses`. Also `threat_metrics` and `kinetic_states` (for future stages).
+### Database (10 tables)
+Core: `fencers`, `sessions`, `bouts` (with `preview_data`, `fencer_bbox`, `opponent_bbox`, `pipeline_progress` JSON columns), `frames` (with `fencer_pose`/`opponent_pose` JSON), `actions` (with `subject` column), `blade_states`, `mesh_states` (WHAM 3D reconstruction per subject per frame), `analyses`. Also `threat_metrics` and `kinetic_states` (for future stages, will consume WHAM 3D data).
 
 ## Key Architectural Details
 

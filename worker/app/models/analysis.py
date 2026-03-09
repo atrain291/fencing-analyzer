@@ -10,6 +10,7 @@ class Action(Base):
     __tablename__ = "actions"
     id: Mapped[int] = mapped_column(primary_key=True)
     bout_id: Mapped[int] = mapped_column(ForeignKey("bouts.id"))
+    subject: Mapped[str] = mapped_column(String(20), default="fencer")
     type: Mapped[str] = mapped_column(String(50))
     start_ms: Mapped[int] = mapped_column(Integer)
     end_ms: Mapped[int] = mapped_column(Integer)
@@ -61,6 +62,20 @@ class KineticState(Base):
     knee_angles: Mapped[dict | None] = mapped_column(JSON)
     off_arm_orientation: Mapped[dict | None] = mapped_column(JSON)
     recovery_complete: Mapped[bool | None] = mapped_column(Boolean)
+
+
+class MeshState(Base):
+    __tablename__ = "mesh_states"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"))
+    subject: Mapped[str] = mapped_column(String(20))
+    body_pose: Mapped[dict] = mapped_column(JSON)
+    global_orient: Mapped[dict] = mapped_column(JSON)
+    betas: Mapped[dict] = mapped_column(JSON)
+    joints_3d: Mapped[dict] = mapped_column(JSON)
+    global_translation: Mapped[dict | None] = mapped_column(JSON)
+    foot_contact: Mapped[dict | None] = mapped_column(JSON)
+    confidence: Mapped[float | None] = mapped_column(Float)
 
 
 class Analysis(Base):
