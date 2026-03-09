@@ -212,16 +212,22 @@ def run_pipeline(self, bout_id: int, video_path: str):
             #     bout_id, pose_results, action_results, blade_states, db
             # )
 
-            # Persist analysis
+            # Persist analysis (upsert — old row may exist from a previous run)
             from app.models import Analysis
-            analysis = Analysis(
-                bout_id=bout_id,
-                technique_scores={},
-                patterns={"actions": action_results},
-                fatigue_markers={},
-                llm_summary=coaching_text,
-            )
-            db.add(analysis)
+            existing = db.query(Analysis).filter(Analysis.bout_id == bout_id).first()
+            if existing:
+                existing.technique_scores = {}
+                existing.patterns = {"actions": action_results}
+                existing.fatigue_markers = {}
+                existing.llm_summary = coaching_text
+            else:
+                db.add(Analysis(
+                    bout_id=bout_id,
+                    technique_scores={},
+                    patterns={"actions": action_results},
+                    fatigue_markers={},
+                    llm_summary=coaching_text,
+                ))
             bout.status = "complete"
             bout.pipeline_progress = {"stage": "complete", "pct": 100}
             db.commit()

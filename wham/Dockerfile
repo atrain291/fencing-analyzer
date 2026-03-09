@@ -26,6 +26,9 @@ RUN pip install --no-cache-dir \
     opencv-python-headless \
     imageio[ffmpeg] \
     timm==0.6.13 \
+    progress \
+    joblib \
+    chumpy \
     gdown \
     celery[redis]==5.4.0 \
     redis==5.1.1 \

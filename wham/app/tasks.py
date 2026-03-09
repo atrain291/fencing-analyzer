@@ -62,10 +62,20 @@ def run_mesh_reconstruction(self, bout_id: int, video_path: str,
                 continue
 
             # Write MeshState rows
+            # WHAM only outputs for frames with valid poses — use frame_ids mapping
+            wham_frame_indices = wham_result.get("frame_ids", list(range(wham_result["frame_count"])))
             mesh_count = 0
-            for t in range(min(wham_result["frame_count"], len(frame_ids))):
+            for t in range(wham_result["frame_count"]):
+                # Map WHAM output frame index to pipeline frame index
+                if t < len(wham_frame_indices):
+                    src_idx = wham_frame_indices[t]
+                else:
+                    break
+                if src_idx >= len(frame_ids):
+                    break
+
                 mesh = MeshState(
-                    frame_id=frame_ids[t],
+                    frame_id=frame_ids[src_idx],
                     subject=subject,
                     body_pose=wham_result["body_poses"][t],
                     global_orient=wham_result["global_orients"][t],

@@ -92,8 +92,12 @@ services:
     volumes:
       - ./wham:/app
       - uploads:/app/uploads
+      - ./wham/dataset:/opt/wham/dataset
+      - ./wham/checkpoints:/opt/wham/checkpoints
     env_file:
       - .env
+    environment:
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256
     depends_on:
       - postgres
       - redis
@@ -103,7 +107,7 @@ services:
       - nvidia.com/gpu=all
     security_opt:
       - label=disable
-    command: celery -A app.celery_app worker --loglevel=info --queues=wham_pipeline
+    command: celery -A app.celery_app worker --loglevel=info --queues=wham_pipeline --concurrency=1
 
   ollama:
     image: docker.io/ollama/ollama:latest

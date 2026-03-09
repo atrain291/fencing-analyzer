@@ -33,8 +33,15 @@ uploads/
 # ML model weights
 *.pt
 *.pth
+*.pth.tar
+*.ckpt
+*.pkl
 *.onnx
 *.engine
+
+# WHAM model data (downloaded separately, not committed)
+wham/checkpoints/
+wham/dataset/
 
 # Claude Code
 .claude/settings.local.json
