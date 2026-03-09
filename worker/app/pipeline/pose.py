@@ -548,7 +548,7 @@ def run_pose_estimation(video_path, video_info, bout_id, db, progress_callback=N
 #   0-16:  COCO 17-point body skeleton
 #   17-22: 6 foot keypoints (toe/heel detail for footwork analysis)
 #   23-90: 68 face keypoints (not stored)
-#   91-132: 42 hand keypoints (not stored)
+#   91-132: 42 hand keypoints (21 per hand — for blade direction)
 KEYPOINT_NAMES = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -558,6 +558,18 @@ KEYPOINT_NAMES = [
     "left_big_toe", "left_small_toe", "left_heel",
     "right_big_toe", "right_small_toe", "right_heel",
 ]
+
+# Hand joint names (21 per hand) — COCO-WholeBody convention
+_HAND_JOINT_NAMES = [
+    "wrist",
+    "thumb_cmc", "thumb_mcp", "thumb_ip", "thumb_tip",
+    "index_mcp", "index_pip", "index_dip", "index_tip",
+    "middle_mcp", "middle_pip", "middle_dip", "middle_tip",
+    "ring_mcp", "ring_pip", "ring_dip", "ring_tip",
+    "pinky_mcp", "pinky_pip", "pinky_dip", "pinky_tip",
+]
+# Left hand: RTMPose indices 91-111, Right hand: indices 112-132
+_HAND_BASE_INDICES = {"lh": 91, "rh": 112}
 
 
 def _normalize_score(raw: float) -> float:
@@ -578,17 +590,32 @@ def keypoints_to_dict(kps: Any, scores: Any,
     scores: (133,) SimCC confidence values (normalized to 0-1 via sigmoid)
     width/height: frame dimensions for normalization (pixel -> 0-1)
 
-    Only the first 17 keypoints (COCO body) are stored.
+    Stores body (17) + feet (6) + both hands (42) = 65 keypoints.
     """
     result = {}
+    # Body + feet keypoints (indices 0-22)
     for i, name in enumerate(KEYPOINT_NAMES):
         if i < len(kps):
             x = float(kps[i][0] / width) if width > 1 else float(kps[i][0])
             y = float(kps[i][1] / height) if height > 1 else float(kps[i][1])
             raw = float(scores[i]) if scores is not None and i < len(scores) else 0.0
             c = _normalize_score(raw)
-            # Skip undetected keypoints
             if c < 0.05 and x == 0.0 and y == 0.0:
                 continue
             result[name] = {"x": x, "y": y, "z": 0.0, "confidence": c}
+
+    # Hand keypoints (indices 91-132) — for blade direction detection
+    for prefix, base_idx in _HAND_BASE_INDICES.items():
+        for j, joint_name in enumerate(_HAND_JOINT_NAMES):
+            idx = base_idx + j
+            if idx >= len(kps):
+                break
+            x = float(kps[idx][0] / width) if width > 1 else float(kps[idx][0])
+            y = float(kps[idx][1] / height) if height > 1 else float(kps[idx][1])
+            raw = float(scores[idx]) if scores is not None and idx < len(scores) else 0.0
+            c = _normalize_score(raw)
+            if c < 0.05 and x == 0.0 and y == 0.0:
+                continue
+            result[f"{prefix}_{joint_name}"] = {"x": x, "y": y, "z": 0.0, "confidence": c}
+
     return result

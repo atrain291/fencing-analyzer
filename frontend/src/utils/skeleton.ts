@@ -22,6 +22,41 @@ export const SKELETON_EDGES: [string, string][] = [
   ['right_big_toe', 'right_small_toe'],
 ]
 
+/** Hand skeleton edges for both hands (wrist -> fingers with MCP line). */
+function _handEdges(prefix: string): [string, string][] {
+  const p = (j: string) => `${prefix}_${j}` as string
+  return [
+    // Wrist to finger bases
+    [p('wrist'), p('thumb_cmc')], [p('wrist'), p('index_mcp')],
+    [p('wrist'), p('pinky_mcp')],
+    // Thumb chain
+    [p('thumb_cmc'), p('thumb_mcp')], [p('thumb_mcp'), p('thumb_ip')],
+    [p('thumb_ip'), p('thumb_tip')],
+    // Index finger
+    [p('index_mcp'), p('index_pip')], [p('index_pip'), p('index_dip')],
+    [p('index_dip'), p('index_tip')],
+    // Middle finger
+    [p('middle_mcp'), p('middle_pip')], [p('middle_pip'), p('middle_dip')],
+    [p('middle_dip'), p('middle_tip')],
+    // Ring finger
+    [p('ring_mcp'), p('ring_pip')], [p('ring_pip'), p('ring_dip')],
+    [p('ring_dip'), p('ring_tip')],
+    // Pinky
+    [p('pinky_mcp'), p('pinky_pip')], [p('pinky_pip'), p('pinky_dip')],
+    [p('pinky_dip'), p('pinky_tip')],
+    // MCP line across knuckles
+    [p('index_mcp'), p('middle_mcp')], [p('middle_mcp'), p('ring_mcp')],
+    [p('ring_mcp'), p('pinky_mcp')],
+    // Wrist to middle MCP (palm center line)
+    [p('wrist'), p('middle_mcp')],
+  ]
+}
+
+export const HAND_SKELETON_EDGES: [string, string][] = [
+  ..._handEdges('lh'),
+  ..._handEdges('rh'),
+]
+
 /** Minimum keypoint confidence required to draw a joint or edge. */
 export const CONFIDENCE_THRESHOLD = 0.3
 
@@ -37,16 +72,21 @@ export function drawSkeleton(
   width: number,
   height: number,
   color: string,
+  showHands: boolean = false,
 ): void {
   // Pose models may return (0,0) for undetected keypoints, sometimes with
   // non-zero confidence. Treat any keypoint at the exact origin as invalid.
   const valid = (kp: Keypoint) =>
     kp.confidence >= CONFIDENCE_THRESHOLD && (kp.x !== 0 || kp.y !== 0)
 
+  const edges = showHands
+    ? [...SKELETON_EDGES, ...HAND_SKELETON_EDGES]
+    : SKELETON_EDGES
+
   // Draw edges
   ctx.strokeStyle = color
   ctx.lineWidth = 2
-  for (const [start, end] of SKELETON_EDGES) {
+  for (const [start, end] of edges) {
     const p1 = pose[start]
     const p2 = pose[end]
     if (!p1 || !p2) continue

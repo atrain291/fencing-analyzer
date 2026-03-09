@@ -1,18 +1,19 @@
-"""Stage 2/3 — Heuristic blade tip projection from wrist/elbow keypoints.
+"""Stage 2/3 — Blade tip projection from hand keypoints + wrist/elbow fallback.
 
-Refinements (Priority 1):
+Blade direction cascade (best to worst):
+  1. Hand keypoints: index finger MCP→PIP direction (actual grip orientation)
+  2. Hand keypoints: MCP line perpendicular (knuckle line, 90° rotated)
+  3. Hand keypoints: wrist→MCP midpoint (coarsest hand signal)
+  4. Forearm: elbow→wrist + wrist angulation correction (original heuristic)
+
+Refinements (Priority 1-3b) — all implemented:
   1a. Persistent weapon arm — determined once from fencer orientation
-  1b. Temporal smoothing — Kalman filter (replaced EMA in Priority 3b)
-  1c. Fixed blade length — calibrated from max arm extension, constant for bout
-
-Refinements (Priority 2):
+  1c. Fixed blade length — calibrated from max arm extension
   2a. Occlusion bridging — Kalman predict-only coasting during gaps
-      (replaced linear interpolation in Priority 3b)
-  2b. Composite confidence score (0.0-1.0) per frame: keypoint + temporal + extension
-
-Refinements (Priority 3):
-  3a. Wrist angulation correction — deflects blade toward opponent based on arm extension
-  3b. Kalman filter — 4-state [x, y, vx, vy] replaces EMA + manual velocity + gap interp
+  2b. Composite confidence score (0.0-1.0): keypoint + temporal + extension
+  3a. Wrist angulation correction (fallback path only)
+  3b. Kalman filter — 4-state [x, y, vx, vy]
+  3c. Hand keypoint blade direction (this file)
 """
 import math
 import logging
@@ -22,6 +23,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 _CONF_THRESHOLD = 0.3
+_HAND_CONF_THRESHOLD = 0.2  # lower threshold for hand keypoints
 _BATCH_SIZE = 300
 _BLADE_ARM_RATIO = 1.5  # 90cm blade / ~60cm arm
 _MAX_GAP_FRAMES = 5  # max gap to coast through before resetting Kalman state
@@ -247,60 +249,167 @@ def _compute_wrist_angulation(pose: dict, weapon: str, ar: float,
     return sign * math.radians(deflection_deg)
 
 
-def _compute_raw_tip(pose: dict, weapon: str, ar: float,
-                     blade_scale: float, orientation: str) -> tuple[float, float, float, float] | None:
+def _compute_hand_blade_direction(
+    hand_kps: dict, ar: float,
+) -> tuple[float, float, float] | None:
+    """Derive blade direction from weapon hand keypoints.
+
+    Tries three methods in order of accuracy:
+    1. Index finger MCP→PIP direction (best proxy for grip/blade axis)
+    2. MCP line perpendicular (knuckle line rotated 90°)
+    3. Hand wrist→MCP midpoint (coarsest signal)
+
+    Args:
+        hand_kps: dict of hand keypoints {joint_name: {x, y, confidence}}
+                  (already filtered to weapon hand, no prefix)
+        ar: aspect ratio (width/height) for distance correction
+
+    Returns: (dx, dy, method_confidence) in AR-corrected space, or None.
     """
-    Compute raw (unsmoothed) blade tip from wrist/elbow keypoints.
+    thr = _HAND_CONF_THRESHOLD
 
-    Includes wrist angulation correction (Priority 3a): the blade direction
-    is rotated toward the opponent based on arm extension ratio.
+    def _kp(name):
+        kp = hand_kps.get(name, {})
+        if kp.get("confidence", 0) >= thr and (kp.get("x", 0) != 0 or kp.get("y", 0) != 0):
+            return kp
+        return None
 
-    Returns (tip_x, tip_y, wrist_conf, elbow_conf) in normalised coordinates,
+    # Method 1: Index finger MCP→PIP direction
+    idx_mcp = _kp("index_mcp")
+    idx_pip = _kp("index_pip")
+    if idx_mcp and idx_pip:
+        dx = (idx_pip["x"] - idx_mcp["x"]) * ar
+        dy = idx_pip["y"] - idx_mcp["y"]
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag > 1e-6:
+            method_conf = min(idx_mcp["confidence"], idx_pip["confidence"])
+            return (dx / mag, dy / mag, method_conf)
+
+    # Method 2: MCP line perpendicular
+    mid_mcp = _kp("middle_mcp")
+    if idx_mcp and mid_mcp:
+        # MCP line runs across knuckles; blade is perpendicular
+        line_dx = (mid_mcp["x"] - idx_mcp["x"]) * ar
+        line_dy = mid_mcp["y"] - idx_mcp["y"]
+        mag = math.sqrt(line_dx * line_dx + line_dy * line_dy)
+        if mag > 1e-6:
+            # Perpendicular: rotate 90° (choice of direction resolved by checking
+            # that result points away from wrist, i.e. toward fingertips)
+            perp_dx = -line_dy / mag
+            perp_dy = line_dx / mag
+
+            # Check direction: should point from wrist toward fingers
+            hw = _kp("wrist")
+            if hw:
+                mcp_mid_x = (idx_mcp["x"] + mid_mcp["x"]) / 2
+                mcp_mid_y = (idx_mcp["y"] + mid_mcp["y"]) / 2
+                to_mcp_dx = (mcp_mid_x - hw["x"]) * ar
+                to_mcp_dy = mcp_mid_y - hw["y"]
+                if perp_dx * to_mcp_dx + perp_dy * to_mcp_dy < 0:
+                    perp_dx, perp_dy = -perp_dx, -perp_dy
+
+            method_conf = min(idx_mcp["confidence"], mid_mcp["confidence"]) * 0.8
+            return (perp_dx, perp_dy, method_conf)
+
+    # Method 3: Hand wrist → MCP midpoint
+    hw = _kp("wrist")
+    any_mcp = idx_mcp or mid_mcp or _kp("ring_mcp")
+    if hw and any_mcp:
+        target = any_mcp  # best available MCP
+        dx = (target["x"] - hw["x"]) * ar
+        dy = target["y"] - hw["y"]
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag > 1e-6:
+            method_conf = min(hw["confidence"], target["confidence"]) * 0.6
+            return (dx / mag, dy / mag, method_conf)
+
+    return None
+
+
+def _compute_raw_tip(pose: dict, weapon: str, ar: float,
+                     blade_scale: float, orientation: str,
+                     hand_kps: dict | None = None) -> tuple[float, float, float, float] | None:
+    """
+    Compute raw (unsmoothed) blade tip position.
+
+    Uses hand keypoints for blade direction when available (Priority 3c),
+    falling back to elbow→wrist + wrist angulation (Priority 3a).
+
+    Returns (tip_x, tip_y, wrist_conf, direction_conf) in normalised coordinates,
     or None if keypoints are below confidence threshold.
     """
     wrist = pose.get(f"{weapon}_wrist", {})
     elbow = pose.get(f"{weapon}_elbow", {})
 
     wrist_conf = wrist.get("confidence", 0.0)
-    elbow_conf = elbow.get("confidence", 0.0)
 
-    if wrist_conf < _CONF_THRESHOLD or elbow_conf < _CONF_THRESHOLD:
+    if wrist_conf < _CONF_THRESHOLD:
         return None
 
     wx, wy = wrist["x"], wrist["y"]
-    ex, ey = elbow["x"], elbow["y"]
 
-    # Blade direction in aspect-ratio-correct space
-    dx = (wx - ex) * ar
-    dy = wy - ey
-    mag = math.sqrt(dx * dx + dy * dy)
-    if mag < 1e-6:
-        return None
-    dx /= mag
-    dy /= mag
+    # Try hand keypoints first for blade direction
+    hand_result = None
+    if hand_kps:
+        hand_result = _compute_hand_blade_direction(hand_kps, ar)
 
-    # 3a. Wrist angulation correction
-    angulation = _compute_wrist_angulation(pose, weapon, ar, orientation)
-    if angulation != 0.0:
-        cos_a = math.cos(angulation)
-        sin_a = math.sin(angulation)
-        dx, dy = dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
+    if hand_result is not None:
+        dx, dy, hand_conf = hand_result
+        # Blend with forearm direction when hand confidence is moderate
+        elbow_conf = elbow.get("confidence", 0.0)
+        if elbow_conf >= _CONF_THRESHOLD:
+            ex, ey = elbow["x"], elbow["y"]
+            forearm_dx = (wx - ex) * ar
+            forearm_dy = wy - ey
+            forearm_mag = math.sqrt(forearm_dx * forearm_dx + forearm_dy * forearm_dy)
+            if forearm_mag > 1e-6:
+                forearm_dx /= forearm_mag
+                forearm_dy /= forearm_mag
+                # Blend: hand_conf < 0.3 → mostly forearm; > 0.5 → mostly hand
+                blend = min(1.0, max(0.0, (hand_conf - 0.2) / 0.3))
+                dx = blend * dx + (1.0 - blend) * forearm_dx
+                dy = blend * dy + (1.0 - blend) * forearm_dy
+                mag = math.sqrt(dx * dx + dy * dy)
+                if mag > 1e-6:
+                    dx /= mag
+                    dy /= mag
+        direction_conf = hand_conf
+    else:
+        # Fallback: elbow→wrist direction with angulation correction
+        elbow_conf = elbow.get("confidence", 0.0)
+        if elbow_conf < _CONF_THRESHOLD:
+            return None
+        ex, ey = elbow["x"], elbow["y"]
+        dx = (wx - ex) * ar
+        dy = wy - ey
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag < 1e-6:
+            return None
+        dx /= mag
+        dy /= mag
+
+        # 3a. Wrist angulation correction (only for forearm-based direction)
+        angulation = _compute_wrist_angulation(pose, weapon, ar, orientation)
+        if angulation != 0.0:
+            cos_a = math.cos(angulation)
+            sin_a = math.sin(angulation)
+            dx, dy = dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a
+        direction_conf = elbow_conf
 
     # Project tip from wrist along blade direction (fixed length)
     tip_x = wx + (dx / ar) * blade_scale
     tip_y = wy + dy * blade_scale
-    return (tip_x, tip_y, wrist_conf, elbow_conf)
+    return (tip_x, tip_y, wrist_conf, direction_conf)
 
 
 def run_blade_tracking(frames: list, video_info: dict, db,
                        orientation: str = "right") -> None:
     """
-    Compute nominal blade tip position for each frame using wrist-elbow geometry.
+    Compute nominal blade tip position for each frame.
 
-    Priority 3a: wrist angulation correction rotates blade toward opponent.
-    Priority 3b: Kalman filter [x, y, vx, vy] replaces EMA smoothing,
-    handles occlusion by coasting on velocity (predict-only), and provides
-    velocity estimates directly (no finite differencing).
+    Uses hand keypoints for blade direction when available (Priority 3c),
+    falling back to elbow→wrist + wrist angulation (Priority 3a).
+    Kalman filter (Priority 3b) smooths and coasts through occlusions.
     """
     from app.models.analysis import BladeState
 
@@ -310,6 +419,7 @@ def run_blade_tracking(frames: list, video_info: dict, db,
 
     # 1a. Persistent weapon arm from orientation
     weapon = _determine_weapon_arm(frames, orientation)
+    hand_prefix = "rh" if weapon == "right" else "lh"
 
     # 1c. Fixed blade length from calibration
     blade_scale = _calibrate_blade_length(frames, weapon, ar)
@@ -341,7 +451,14 @@ def run_blade_tracking(frames: list, video_info: dict, db,
 
         raw_tip = None
         if pose:
-            raw_tip = _compute_raw_tip(pose, weapon, ar, blade_scale, orientation)
+            # Extract weapon hand keypoints (strip prefix for blade direction fn)
+            hand_kps = {
+                k[len(hand_prefix) + 1:]: v
+                for k, v in pose.items()
+                if k.startswith(hand_prefix + "_")
+            } or None
+            raw_tip = _compute_raw_tip(pose, weapon, ar, blade_scale, orientation,
+                                       hand_kps=hand_kps)
 
         if raw_tip is None:
             # --- No valid measurement ---
