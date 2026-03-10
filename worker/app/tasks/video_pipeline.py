@@ -184,7 +184,8 @@ def run_pipeline(self, bout_id: int, video_path: str):
             from app.models.analysis import BladeState
             blade_rows = (db.query(BladeState)
                           .join(Frame, BladeState.frame_id == Frame.id)
-                          .filter(Frame.bout_id == bout_id)
+                          .filter(Frame.bout_id == bout_id,
+                                  BladeState.subject == "fencer")
                           .all())
             blade_speeds = {
                 bs.frame_id: {"speed": bs.speed, "confidence": bs.confidence}

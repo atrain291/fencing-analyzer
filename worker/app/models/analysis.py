@@ -33,7 +33,8 @@ class Frame(Base):
 class BladeState(Base):
     __tablename__ = "blade_states"
     id: Mapped[int] = mapped_column(primary_key=True)
-    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"), unique=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"))
+    subject: Mapped[str] = mapped_column(String(20), default="fencer")
     tip_xyz: Mapped[dict] = mapped_column(JSON)
     velocity_xyz: Mapped[dict] = mapped_column(JSON)
     speed: Mapped[float | None] = mapped_column(Float)

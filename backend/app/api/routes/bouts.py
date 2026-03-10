@@ -66,7 +66,7 @@ def get_bout_frames(bout_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Bout not found")
     frames = (
         db.query(Frame)
-        .options(joinedload(Frame.blade_state), joinedload(Frame.mesh_states))
+        .options(joinedload(Frame.blade_states), joinedload(Frame.mesh_states))
         .filter(Frame.bout_id == bout_id)
         .order_by(Frame.timestamp_ms)
         .all()
@@ -77,9 +77,19 @@ def get_bout_frames(bout_id: int, db: Session = Depends(get_db)):
         .order_by(Action.start_ms)
         .all()
     )
-    from app.schemas.bout import FrameRead, ActionRead
+    from app.schemas.bout import FrameRead, BladeStateRead, ActionRead
+
+    def serialize_frame(f: Frame) -> dict:
+        d = FrameRead.model_validate(f).model_dump()
+        # Map blade_states by subject for frontend consumption
+        fencer_bs = next((bs for bs in f.blade_states if bs.subject == "fencer"), None)
+        opp_bs = next((bs for bs in f.blade_states if bs.subject == "opponent"), None)
+        d["blade_state"] = BladeStateRead.model_validate(fencer_bs).model_dump() if fencer_bs else None
+        d["opponent_blade_state"] = BladeStateRead.model_validate(opp_bs).model_dump() if opp_bs else None
+        return d
+
     return {
-        "frames": [FrameRead.model_validate(f).model_dump() for f in frames],
+        "frames": [serialize_frame(f) for f in frames],
         "actions": [ActionRead.model_validate(a).model_dump() for a in actions],
     }
 

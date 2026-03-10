@@ -5,6 +5,7 @@ from pydantic import AliasChoices, BaseModel, Field
 class BladeStateRead(BaseModel):
     model_config = {"from_attributes": True}
 
+    subject: str = "fencer"
     tip_xyz: dict
     nominal_xyz: dict | None
     velocity_xyz: dict
@@ -29,7 +30,9 @@ class FrameRead(BaseModel):
     timestamp_ms: int
     fencer_pose: dict
     opponent_pose: dict | None
-    blade_state: BladeStateRead | None = None
+    blade_state: BladeStateRead | None = None  # fencer blade (for backwards compat)
+    opponent_blade_state: BladeStateRead | None = None
+    blade_states: list[BladeStateRead] = []
     mesh_states: list[MeshStateRead] = []
 
 

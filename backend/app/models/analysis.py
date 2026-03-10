@@ -33,7 +33,7 @@ class Frame(Base):
     action_id: Mapped[int | None] = mapped_column(ForeignKey("actions.id"), nullable=True)
 
     bout: Mapped["Bout"] = relationship(back_populates="frames")  # noqa: F821
-    blade_state: Mapped["BladeState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
+    blade_states: Mapped[list["BladeState"]] = relationship(back_populates="frame", cascade="all, delete-orphan")
     threat_metrics: Mapped["ThreatMetrics | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
     kinetic_state: Mapped["KineticState | None"] = relationship(back_populates="frame", cascade="all, delete-orphan")
     mesh_states: Mapped[list["MeshState"]] = relationship(back_populates="frame", cascade="all, delete-orphan")
@@ -43,7 +43,8 @@ class BladeState(Base):
     __tablename__ = "blade_states"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"), unique=True)
+    frame_id: Mapped[int] = mapped_column(ForeignKey("frames.id"))
+    subject: Mapped[str] = mapped_column(String(20), default="fencer")  # "fencer" or "opponent"
     tip_xyz: Mapped[dict] = mapped_column(JSON)          # {x, y, z}
     velocity_xyz: Mapped[dict] = mapped_column(JSON)     # {x, y, z}
     speed: Mapped[float | None] = mapped_column(Float)   # m/s
@@ -52,7 +53,7 @@ class BladeState(Base):
     correction_cost: Mapped[float | None] = mapped_column(Float)  # 0.0–1.0
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    frame: Mapped["Frame"] = relationship(back_populates="blade_state")
+    frame: Mapped["Frame"] = relationship(back_populates="blade_states")
 
 
 class ThreatMetrics(Base):

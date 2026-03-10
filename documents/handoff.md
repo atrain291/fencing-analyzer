@@ -1,64 +1,61 @@
-# Session 13 Handoff — 2026-03-10
+# Session 14 Handoff — 2026-03-10
 
 ## What Was Done
 
-### WHAM 3D Reconstruction — End-to-End Working (COMPLETE)
-- **Commit**: `e9f4459` on `feature/stage-3-blade-refinement`
-- Rewrote `wham/app/inference.py` to use actual WHAM API (`build_network`, `build_body_model`, `FeatureExtractor`)
-- Staged GPU loading to fit in 12GB VRAM (4070 Super):
-  1. Load HMR2a ViT backbone (~2.9 GB) → extract features frame-by-frame → release
-  2. Load WHAM Network (~0.2 GB) → run inference → release
-- Custom per-frame extraction loop with `torch.cuda.empty_cache()` every 50 frames
-- `os.chdir(WHAM_PATH)` required before loading — WHAM uses relative config paths
-- 3D joints from `network.output.joints` (internal SMPL state, not in eval output dict)
-- Betas averaged across frames: `pred_betas.mean(axis=0).tolist()`
-- Fixed `wham/app/tasks.py`: uses `frame_ids` to map WHAM output back to pipeline frame IDs
-- Added missing Python deps to Dockerfile: `progress`, `joblib`, `chumpy`, `gdown`
-- Added volume mounts in docker-compose: `wham/dataset`, `wham/checkpoints`
-- SMPL model files manually downloaded and placed (non-commercial license)
+### Dual-Subject Blade Tracking (COMPLETE)
+- **BladeState now tracks both fencer and opponent**: added `subject` column ("fencer"/"opponent")
+- Removed `unique=True` constraint on `frame_id` — one row per subject per frame
+- Refactored `blade.py`: `run_blade_tracking()` calls `_run_blade_for_subject()` for both subjects
+- Alembic migration `b9c0d1e2f3a4`: adds subject column, drops unique frame_id constraint
+- Backend model/schema/route updated: `Frame.blade_states` (plural list), serializes by subject
+- Frontend renders opponent blade in cyan (`#06b6d4`), fencer blade in green (`#22c55e`)
 
-### Hand Keypoint Blade Direction Detection (COMPLETE)
-- **Commit**: `d5e4109` on `feature/stage-3-blade-refinement`
-- Extended `pose.py` to extract 42 hand keypoints (21 per hand, `lh_`/`rh_` prefix)
-  - Now stores 65 keypoints per frame (was 23: 17 body + 6 foot)
-  - Hand joint names: wrist, thumb (CMC/MCP/IP/tip), index/middle/ring/pinky (MCP/PIP/DIP/tip)
-- New `_compute_hand_blade_direction()` in `blade.py` with 3-method cascade:
-  1. Index finger MCP→PIP direction (highest confidence)
-  2. MCP line perpendicular with direction check (×0.8 confidence)
-  3. Wrist→MCP midpoint (×0.6 confidence)
-- Confidence-weighted blending between hand-derived and forearm-derived directions
-  - Blend formula: `blend = clamp((hand_conf - 0.2) / 0.3, 0, 1)`
-  - When hand confidence moderate (0.2-0.5), smoothly transitions between methods
-  - When hand confidence high (>0.5), uses hand direction; skips wrist angulation correction
-- Frontend `skeleton.ts`: added `HAND_SKELETON_EDGES` (23 edges per hand: finger chains + MCP line + palm center)
-  - `drawSkeleton()` accepts `showHands` parameter (default false)
+### Forward Direction Fix — Position-Based (COMPLETE)
+- **Root cause**: Orientation detection (`detect_orientation()`) was inverted for side-profile views
+  - Used left/right shoulder x-positions, but in COCO the anatomical right shoulder is always
+    more to the right regardless of facing direction in near-profile views
+  - This cascaded to wrong weapon arm detection AND wrong forward-hemisphere clamp
+  - Both blades pointed away from each other instead of toward each other
+- **Fix**: New `_compute_forward_sign()` function computes forward direction from actual
+  hip-center positions of both fencers, bypassing the broken orientation heuristic entirely
+  - Returns +1.0 if opponent is to the right, -1.0 if to the left
+  - Used for both weapon arm detection and forward-hemisphere clamp
+  - `_determine_weapon_arm_from_poses()` now takes `forward_sign` instead of `orientation`
+  - `_run_blade_for_subject()` derives `subject_orientation` from `forward_sign` for angulation
+- Verified: fencer tip_x=0.565 (right of wrist 0.478, toward opponent), opponent tip_x=0.591 (left of wrist 0.679, toward fencer)
 
-### Fullscreen Skeleton Overlay Fix (COMPLETE)
-- **Commit**: `fa09687` on `feature/stage-3-blade-refinement`
-- Bug: skeletons disappeared when video player was maximized
-- Root causes:
-  1. Native video fullscreen button only fullscreened `<video>`, not the container with canvas
-  2. Canvas used `inset-0 w-full h-full` which misaligns with `object-contain` letterboxing
-- Fixes:
-  - Hidden native fullscreen button via CSS (`::-webkit-media-controls-fullscreen-button`)
-  - Fullscreen now targets `playerPanelRef` (entire left column: video + scrubber + timeline + controls)
-  - Flex layout in fullscreen: video grows to fill space, controls stay at bottom
-  - Canvas dynamically positioned to match video's `object-contain` rendered area
-  - Redirect fallback: if video itself enters fullscreen, exit and re-enter on player panel
+### Two-Pass Blade Refinement Architecture (COMPLETE — from session 13)
+- Pass 1: 2D keypoints only (immediate, in main pipeline)
+- Pass 2: WHAM 3D refinement (async callback after mesh reconstruction)
+- `blade_refinement.py`: uses SMPL wrist rotation + 3D wrist-hand vector
+- Celery task dispatched by WHAM worker after mesh_states committed
 
-### Pipeline Bug Fixes
-- **Analysis upsert**: `duplicate key value violates unique constraint` on reprocessing — changed to upsert logic in `video_pipeline.py`
-- **Broken SMPL symlinks**: container symlinks pointed to host paths — replaced with file copies
-- **WHAM FP16 mismatch**: HMR2a doesn't support half precision — kept in FP32
+### Hand Keypoint Direction Improvements (from session 13)
+- Replaced fine-grained MCP-PIP (3-4px, too noisy) with wrist-fingertip-centroid (~20px)
+- Minimum span gate: `_HAND_MIN_SPAN_NORM = 0.008` (~15px at 1920w)
+- Hand direction capped at 50% blend weight, forearm always contributes
+- Angulation range 15-45 deg (was 5-25), inverted mapping (bent arm = max deflection)
+
+### Fullscreen Overlay Fixes (from session 13)
+- `playerPanelRef` fullscreens entire left column (video + scrubber + timeline + controls)
+- Canvas dynamically positioned for `object-contain` letterboxing
+- Hidden native fullscreen button, redirect fallback
 
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
 - **All 7 containers running**: frontend(:5174), api(:8001), worker(GPU), wham(GPU), postgres(:5433), redis(:6380), ollama(:11435)
-- **Ports**: alternate ports to coexist with sister project on default ports
-- **WHAM**: fully operational with staged GPU loading, SMPL models downloaded
-- **Keypoints**: 65 per frame (17 body + 6 foot + 42 hand)
-- **Migrations applied**: `f7a8b9c0d1e2` (action subject), `a8b9c0d1e2f3` (mesh_states)
+- **Blade tracking**: dual-subject (fencer + opponent), position-based forward direction
+- **Migrations applied**: through `b9c0d1e2f3a4` (blade_states subject column)
 - **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
+
+## Known Issues / Next Steps for Blade Tracking
+- Blade direction still needs refinement — correct general direction but accuracy varies
+- Possible improvements:
+  - Use wrist-to-fingertip vector more aggressively when hand keypoints are available
+  - Per-frame opponent position for forward direction (currently uses average across frames)
+  - Leverage WHAM 3D wrist rotation data when available (Pass 2 refinement)
+  - Temporal smoothing improvements — Kalman filter may over-smooth direction changes
+  - Investigate pixel-based blade detection (Hough lines, edge detection in hand region)
 
 ## Branch Lineage
 ```
@@ -69,9 +66,6 @@ master
 ```
 
 ## What's Next
-
-### Run Pending Alembic Migrations
-- 3 migrations not yet applied: confidence, blade_speed, unique fencer name
 
 ### WHAM Downstream Consumers (HIGH PRIORITY)
 - Populate `kinetic_states` from WHAM 3D joints (joint angles, angular velocities)
@@ -85,27 +79,25 @@ master
 ### Frontend Updates
 - 3D mesh visualization (consume WHAM mesh_states data)
 - Toggle hand skeleton rendering in review UI (infrastructure ready, `showHands` param)
-- Visualize detected strip polygon in configure UI
-- Surface `preparation` action type in action timeline / drill report
 - Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
 
 ### Future Research
-- 4D Gaussian splatting for multi-camera fencing replay (Arcturus, 60-90 degree camera separation)
+- 4D Gaussian splatting for multi-camera fencing replay
 - LLM coaching re-enablement (Claude API integration exists, currently stubbed)
+- Pixel-based blade detection (complement geometric projection)
 
 ## Commits This Session
 ```
+(pending) Fix blade direction: position-based forward direction, dual-subject tracking
+c04cd20 Add WHAM 3D blade refinement pass (two-pass architecture)
+03cc680 Update handoff for session 13
 fa09687 Fix skeleton overlay disappearing on fullscreen maximize
-d5e4109 Add hand keypoint blade direction detection
-e9f4459 Get WHAM 3D reconstruction working end-to-end
-0aeb64c Add foot keypoints to pose estimation and skeleton rendering
 ```
 
 ## Previous Sessions
+- Session 13: WHAM 3D blade refinement, hand keypoint improvements, fullscreen overlay fix
 - Session 12: WHAM end-to-end, hand keypoints, fullscreen fix, foot keypoints
 - Session 11: WHAM container setup, foot keypoints started, per-fencer action timeline
 - Session 10: RTMPose migration, GPU fix, configurable ports, self-contained project
 - Session 9: P2c action-blade integration, P3a wrist angulation, P3b Kalman filter, strip detection, fencer housekeeping
 - Session 8: P2a occlusion bridging + P2b confidence score (`296b586`)
-- Session 7: Housekeeping fixes (`21172db`, `13d1bc5`)
-- Session 6: API memory leak, H.264 transcode (`60ca600`, `3248aa9`)

@@ -68,7 +68,8 @@ function drawBlade(
   pose: Record<string, Keypoint>,
   bladeState: BladeState,
   width: number,
-  height: number
+  height: number,
+  color: string = '#22c55e'
 ) {
   const wrist = pose['right_wrist'] ?? pose['left_wrist']
   if (!wrist || wrist.confidence < 0.3) return
@@ -80,7 +81,7 @@ function drawBlade(
   const conf = bladeState.confidence ?? 0.85
   const alpha = 0.3 + 0.55 * conf
 
-  ctx.strokeStyle = '#22c55e'
+  ctx.strokeStyle = color
   ctx.lineWidth = 2
   ctx.globalAlpha = alpha
   ctx.beginPath()
@@ -88,7 +89,7 @@ function drawBlade(
   ctx.lineTo(tip.x * width, tip.y * height)
   ctx.stroke()
 
-  ctx.fillStyle = '#22c55e'
+  ctx.fillStyle = color
   ctx.globalAlpha = alpha
   ctx.beginPath()
   ctx.arc(tip.x * width, tip.y * height, 5, 0, Math.PI * 2)
@@ -423,6 +424,14 @@ export default function VideoReview() {
         ? interpolatePose(a.opponent_pose, b.opponent_pose, t)
         : a.opponent_pose
       drawSkeleton(ctx, pose, canvas.width, canvas.height, '#3b82f6')
+
+      // Draw opponent blade overlay (cyan)
+      if (showBladeRef.current && a.opponent_blade_state) {
+        const oppBlade = b.opponent_blade_state
+          ? interpolateBladeState(a.opponent_blade_state, b.opponent_blade_state, t)
+          : a.opponent_blade_state
+        drawBlade(ctx, pose, oppBlade, canvas.width, canvas.height, '#06b6d4')
+      }
     }
   }, [])
 

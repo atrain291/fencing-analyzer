@@ -29,6 +29,7 @@ export interface Frame {
   fencer_pose: Record<string, Keypoint>
   opponent_pose: Record<string, Keypoint> | null
   blade_state: BladeState | null
+  opponent_blade_state: BladeState | null
   mesh_states: MeshState[]
 }
 
