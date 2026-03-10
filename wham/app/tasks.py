@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="wham.tasks.run_mesh_reconstruction", bind=True)
 def run_mesh_reconstruction(self, bout_id: int, video_path: str,
-                            video_info: dict) -> dict:
+                            video_info: dict,
+                            orientation: str | None = None) -> dict:
     """Run WHAM 3D mesh reconstruction for both fencer and opponent.
 
     Called by the main worker pipeline after pose estimation completes.
@@ -97,5 +98,20 @@ def run_mesh_reconstruction(self, bout_id: int, video_path: str,
 
         # Release WHAM model from GPU
         release_model()
+
+    # Dispatch blade refinement to main worker queue (fire-and-forget)
+    # This uses the 3D mesh data to improve blade tip positions
+    try:
+        import os
+        from celery import Celery
+        worker_broker = Celery(broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+        worker_broker.send_task(
+            "worker.tasks.blade_refinement.refine_blade_with_mesh",
+            args=[bout_id, video_info, orientation],
+            queue="celery",  # main worker queue
+        )
+        logger.info("Dispatched blade refinement for bout %d", bout_id)
+    except Exception:
+        logger.warning("Failed to dispatch blade refinement for bout %d", bout_id, exc_info=True)
 
     return {"bout_id": bout_id, "status": "complete", "results": results}

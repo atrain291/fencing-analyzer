@@ -47,18 +47,20 @@ def _release_gpu():
     logger.info("GPU memory released (RTMPose unloaded)")
 
 
-def _dispatch_wham(bout_id: int, video_path: str, video_info: dict):
+def _dispatch_wham(bout_id: int, video_path: str, video_info: dict,
+                   orientation: str | None = None):
     """Dispatch WHAM 3D reconstruction to the wham worker queue.
 
     This is fire-and-forget: the main pipeline continues with blade tracking
     while WHAM runs asynchronously in a separate container. Results are
     written directly to the mesh_states table by the WHAM worker.
+    After WHAM completes, it dispatches a blade refinement callback.
     """
     from celery import Celery
     wham_app = Celery(broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
     wham_app.send_task(
         "wham.tasks.run_mesh_reconstruction",
-        args=[bout_id, video_path, video_info],
+        args=[bout_id, video_path, video_info, orientation],
         queue="wham_pipeline",
     )
 
@@ -160,17 +162,20 @@ def run_pipeline(self, bout_id: int, video_path: str):
                       .order_by(Frame.timestamp_ms)
                       .all())
 
+            # Detect fencer orientation (needed by both WHAM refinement and blade tracking)
+            orientation = detect_orientation(frames)
+
             # Stage 2.5 — WHAM 3D mesh reconstruction (async, separate container)
+            # Orientation passed through so WHAM can dispatch blade refinement callback
             _update_progress(bout_id, "mesh_reconstruction", 81, db)
             try:
-                _dispatch_wham(bout_id, video_path, video_info)
+                _dispatch_wham(bout_id, video_path, video_info, orientation=orientation)
                 logger.info("WHAM task dispatched for bout %d", bout_id)
             except Exception:
                 logger.warning("WHAM dispatch failed — continuing without 3D data", exc_info=True)
 
-            # Stage 3 — Blade tracking (orientation needed, runs before actions)
+            # Stage 3 — Blade tracking (Pass 1: 2D keypoints only)
             _update_progress(bout_id, "blade_tracking", 83, db)
-            orientation = detect_orientation(frames)
             run_blade_tracking(frames, video_info, db, orientation=orientation)
             logger.info("Blade tracking complete")
 
