@@ -201,6 +201,7 @@ export default function VideoReview() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const playerPanelRef = useRef<HTMLDivElement>(null)
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null)
   const [videoUrl, setVideoUrl] = useState('')
   const [frames, setFrames] = useState<Frame[]>([])
@@ -236,7 +237,7 @@ export default function VideoReview() {
 
   function toggleFullscreen() {
     if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen()
+      playerPanelRef.current?.requestFullscreen()
     } else {
       document.exitFullscreen()
     }
@@ -302,7 +303,17 @@ export default function VideoReview() {
   }, [boutId])
 
   useEffect(() => {
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
+    const onFsChange = () => {
+      const fsEl = document.fullscreenElement
+      setIsFullscreen(!!fsEl)
+      // If the video itself went fullscreen (native controls), redirect to
+      // the player panel so canvas overlay and controls stay visible
+      if (fsEl === videoRef.current && playerPanelRef.current) {
+        document.exitFullscreen().then(() => {
+          playerPanelRef.current?.requestFullscreen()
+        })
+      }
+    }
     document.addEventListener('fullscreenchange', onFsChange)
     return () => document.removeEventListener('fullscreenchange', onFsChange)
   }, [])
@@ -310,17 +321,43 @@ export default function VideoReview() {
   const renderSkeleton = useCallback(() => {
     const video = videoRef.current
     const canvas = canvasRef.current
+    const container = containerRef.current
     const currentFrames = framesRef.current
-    if (!video || !canvas || currentFrames.length === 0) return
+    if (!video || !canvas || !container || currentFrames.length === 0) return
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    // Sync canvas size with video
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth || video.clientWidth
-      canvas.height = video.videoHeight || video.clientHeight
+    // Sync canvas internal resolution with video native resolution
+    const vw = video.videoWidth || video.clientWidth
+    const vh = video.videoHeight || video.clientHeight
+    if (canvas.width !== vw || canvas.height !== vh) {
+      canvas.width = vw
+      canvas.height = vh
     }
+
+    // Compute where the video content renders within the container
+    // (object-contain creates letterboxing when aspect ratios differ)
+    const containerW = container.clientWidth
+    const containerH = container.clientHeight
+    const videoAR = vw / vh
+    const containerAR = containerW / containerH
+    let renderW: number, renderH: number, offsetX: number, offsetY: number
+    if (videoAR > containerAR) {
+      renderW = containerW
+      renderH = containerW / videoAR
+      offsetX = 0
+      offsetY = (containerH - renderH) / 2
+    } else {
+      renderH = containerH
+      renderW = containerH * videoAR
+      offsetX = (containerW - renderW) / 2
+      offsetY = 0
+    }
+    canvas.style.left = `${offsetX}px`
+    canvas.style.top = `${offsetY}px`
+    canvas.style.width = `${renderW}px`
+    canvas.style.height = `${renderH}px`
 
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height)
@@ -484,40 +521,53 @@ export default function VideoReview() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Video + skeleton canvas */}
-        <div className="lg:col-span-3 space-y-3">
-          <div
-            ref={containerRef}
-            className={[
-              'relative bg-black rounded-xl overflow-hidden',
-              isFullscreen ? 'rounded-none' : '',
-            ].filter(Boolean).join(' ')}
-            style={{
-              resize: isFullscreen ? 'none' : 'both',
-              aspectRatio: '16 / 9',
-              maxWidth: '100%',
-              minWidth: '320px',
-              minHeight: '180px',
-            }}
-          >
+        {/* Video + skeleton canvas + controls */}
+        <div
+          ref={playerPanelRef}
+          className={[
+            'lg:col-span-3',
+            isFullscreen
+              ? 'flex flex-col bg-gray-950 p-3 gap-3'
+              : 'space-y-3',
+          ].join(' ')}
+        >
+          <div className={[
+            'relative',
+            isFullscreen ? 'flex-1 min-h-0' : '',
+          ].join(' ')}>
+            <div
+              ref={containerRef}
+              className={[
+                'relative bg-black overflow-hidden',
+                isFullscreen ? 'h-full rounded-lg' : 'rounded-xl',
+              ].join(' ')}
+              style={isFullscreen ? {} : {
+                resize: 'both',
+                aspectRatio: '16 / 9',
+                maxWidth: '100%',
+                minWidth: '320px',
+                minHeight: '180px',
+              }}
+            >
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                controls
+                muted
+                className="w-full h-full object-contain"
+              />
+              <canvas
+                ref={canvasRef}
+                className="absolute pointer-events-none"
+              />
+            </div>
             <button
               onClick={toggleFullscreen}
-              className="absolute top-2 right-2 z-10 p-1.5 bg-black/50 hover:bg-black/70 rounded-md text-white transition-colors"
+              className="absolute top-2 right-2 z-20 p-1.5 bg-black/50 hover:bg-black/70 rounded-md text-white transition-colors"
               title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen with overlay'}
             >
               {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
             </button>
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              controls
-              muted
-              className="w-full h-full object-contain"
-            />
-            <canvas
-              ref={canvasRef}
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            />
           </div>
           {/* Custom Scrubber Bar */}
           {videoDurationMs > 0 && (

@@ -5,3 +5,11 @@
 body {
   @apply bg-gray-950 text-gray-100 antialiased;
 }
+
+/* Hide native video fullscreen button — we use our own that includes the canvas overlay */
+video::-webkit-media-controls-fullscreen-button {
+  display: none;
+}
+video::-moz-media-controls-fullscreen-button {
+  display: none;
+}
