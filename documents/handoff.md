@@ -1,4 +1,4 @@
-# Session 14 Handoff — 2026-03-10
+# Session 14 Handoff — 2026-03-11
 
 ## What Was Done
 
@@ -12,50 +12,55 @@
 
 ### Forward Direction Fix — Position-Based (COMPLETE)
 - **Root cause**: Orientation detection (`detect_orientation()`) was inverted for side-profile views
-  - Used left/right shoulder x-positions, but in COCO the anatomical right shoulder is always
-    more to the right regardless of facing direction in near-profile views
-  - This cascaded to wrong weapon arm detection AND wrong forward-hemisphere clamp
-  - Both blades pointed away from each other instead of toward each other
-- **Fix**: New `_compute_forward_sign()` function computes forward direction from actual
-  hip-center positions of both fencers, bypassing the broken orientation heuristic entirely
-  - Returns +1.0 if opponent is to the right, -1.0 if to the left
-  - Used for both weapon arm detection and forward-hemisphere clamp
+  - COCO left/right shoulder positions don't reliably indicate facing direction in profile views
+  - Cascaded to wrong weapon arm detection AND wrong forward-hemisphere clamp
+- **Fix**: New `_compute_forward_sign()` — computes forward direction from actual hip positions
+  of both fencers, bypassing the broken orientation heuristic
   - `_determine_weapon_arm_from_poses()` now takes `forward_sign` instead of `orientation`
-  - `_run_blade_for_subject()` derives `subject_orientation` from `forward_sign` for angulation
-- Verified: fencer tip_x=0.565 (right of wrist 0.478, toward opponent), opponent tip_x=0.591 (left of wrist 0.679, toward fencer)
+  - `_run_blade_for_subject()` derives `subject_orientation` from `forward_sign`
 
-### Two-Pass Blade Refinement Architecture (COMPLETE — from session 13)
+### Blade Length Calibration Improvements (COMPLETE)
+- **Body-height calibration** (primary): measures nose→ankle height, multiplied by `_BLADE_HEIGHT_RATIO=0.66`
+  - Less susceptible to foreshortening than arm-based (torso/legs nearly parallel to camera)
+  - Compensates for en garde stance lowering apparent height, nose-to-ankle gap vs full height
+- **Segmented arm calibration** (fallback): shoulder→elbow + elbow→wrist, P90, ratio 1.8
+- **WHAM 3D refinement** (Pass 2): per-frame blade scale using 3D arm foreshortening factor
+  - `_get_median_3d_arm_length()`: stable 3D arm length from WHAM (skeleton doesn't change)
+  - `_compute_per_frame_blade_scale()`: varies blade length per frame based on arm projection
+- **TODO**: blade length still appears slightly short — revisit with fresh ideas later
+  - Consider pixel-based blade detection (Hough lines in hand ROI)
+  - Consider using weapon length as user input during configuration
+
+### Opponent Blade Speeds for Action Classification (COMPLETE)
+- Action classification now receives both fencer AND opponent blade speeds
+- Previously opponent actions were classified without blade data
+- Pipeline passes `opponent_blade_speeds` dict alongside `fencer_blade_speeds`
+
+### Processing UI Stage Order Fix (COMPLETE)
+- `ProcessingStatus.tsx` showed action_classification before blade_tracking
+- Fixed to match actual pipeline order: blade_tracking → action_classification
+
+### Two-Pass Blade Refinement Architecture (from session 13)
 - Pass 1: 2D keypoints only (immediate, in main pipeline)
 - Pass 2: WHAM 3D refinement (async callback after mesh reconstruction)
-- `blade_refinement.py`: uses SMPL wrist rotation + 3D wrist-hand vector
-- Celery task dispatched by WHAM worker after mesh_states committed
-
-### Hand Keypoint Direction Improvements (from session 13)
-- Replaced fine-grained MCP-PIP (3-4px, too noisy) with wrist-fingertip-centroid (~20px)
-- Minimum span gate: `_HAND_MIN_SPAN_NORM = 0.008` (~15px at 1920w)
-- Hand direction capped at 50% blend weight, forearm always contributes
-- Angulation range 15-45 deg (was 5-25), inverted mapping (bent arm = max deflection)
 
 ### Fullscreen Overlay Fixes (from session 13)
 - `playerPanelRef` fullscreens entire left column (video + scrubber + timeline + controls)
 - Canvas dynamically positioned for `object-contain` letterboxing
-- Hidden native fullscreen button, redirect fallback
 
 ## Current State
 - **Branch**: `feature/stage-3-blade-refinement`
 - **All 7 containers running**: frontend(:5174), api(:8001), worker(GPU), wham(GPU), postgres(:5433), redis(:6380), ollama(:11435)
-- **Blade tracking**: dual-subject (fencer + opponent), position-based forward direction
+- **Blade tracking**: dual-subject, position-based forward, body-height calibration
 - **Migrations applied**: through `b9c0d1e2f3a4` (blade_states subject column)
 - **Migrations pending**: `c4d5e6f7a8b9` (confidence), `d5e6f7a8b9c0` (blade speed), `e6f7a8b9c0d1` (unique fencer name)
 
 ## Known Issues / Next Steps for Blade Tracking
-- Blade direction still needs refinement — correct general direction but accuracy varies
-- Possible improvements:
-  - Use wrist-to-fingertip vector more aggressively when hand keypoints are available
-  - Per-frame opponent position for forward direction (currently uses average across frames)
-  - Leverage WHAM 3D wrist rotation data when available (Pass 2 refinement)
-  - Temporal smoothing improvements — Kalman filter may over-smooth direction changes
-  - Investigate pixel-based blade detection (Hough lines, edge detection in hand region)
+- Blade length still slightly short in some frames — revisit later
+  - Pixel-based blade detection (Hough lines, edge detection in hand region)
+  - User-provided weapon length during bout configuration
+  - Better WHAM 3D→2D projection for per-frame foreshortening correction
+- Blade direction accuracy varies — hand keypoints still noisy at fencing video scale
 
 ## Branch Lineage
 ```
@@ -74,24 +79,20 @@ master
 
 ### Strip Homography
 - `pipeline/homography.py` for strip-based world coordinate correction
-- Replaces WHAM's unreliable global trajectory for fencing
 
 ### Frontend Updates
 - 3D mesh visualization (consume WHAM mesh_states data)
-- Toggle hand skeleton rendering in review UI (infrastructure ready, `showHands` param)
+- Toggle hand skeleton rendering in review UI
 - Display `blade_speed_avg` / `blade_speed_peak` per action in review UI
 
 ### Future Research
 - 4D Gaussian splatting for multi-camera fencing replay
 - LLM coaching re-enablement (Claude API integration exists, currently stubbed)
-- Pixel-based blade detection (complement geometric projection)
 
 ## Commits This Session
 ```
-(pending) Fix blade direction: position-based forward direction, dual-subject tracking
-c04cd20 Add WHAM 3D blade refinement pass (two-pass architecture)
-03cc680 Update handoff for session 13
-fa09687 Fix skeleton overlay disappearing on fullscreen maximize
+2a9df00 Fix blade direction and add dual-subject blade tracking
+(pending) Blade length calibration, opponent blade speeds, UI stage order fix
 ```
 
 ## Previous Sessions

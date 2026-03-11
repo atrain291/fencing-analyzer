@@ -28,7 +28,14 @@ _HAND_MIN_SPAN_NORM = 0.008  # minimum normalised distance for hand direction me
                              # (~15px at 1920w). Below this, hand keypoints are too
                              # close together to derive a reliable direction.
 _BATCH_SIZE = 300
-_BLADE_ARM_RATIO = 1.5  # 90cm blade / ~60cm arm
+_BLADE_ARM_RATIO = 1.8  # 90cm blade / ~60cm arm = 1.5 nominal, boosted to 1.8
+                        # to compensate for 2D projection foreshortening of the arm
+                        # in side-profile fencing video (arm extends partly in depth)
+_BLADE_HEIGHT_RATIO = 0.66  # ~100cm wrist-to-tip / ~175cm body height = 0.57 nominal
+                            # Boosted to 0.66 because:
+                            # 1. Nose→ankle underestimates full height (missing head-top + foot sole)
+                            # 2. En garde stance lowers apparent height (bent knees, forward lean)
+                            # 3. Wrist-to-tip includes hand+guard (~10cm) past wrist keypoint
 _MAX_GAP_FRAMES = 5  # max gap to coast through before resetting Kalman state
 
 # Confidence weights
@@ -668,33 +675,100 @@ def _determine_weapon_arm_from_poses(frames: list, pose_key: str, forward_sign: 
     return weapon
 
 
+def _measure_body_height(frames: list, pose_key: str, ar: float) -> float | None:
+    """Measure body height (head→ankle) from 2D keypoints.
+
+    Body height is much more stable than arm length for side-profile fencing video
+    because the torso and legs are nearly parallel to the image plane. Uses the
+    median of per-frame measurements for robustness.
+    """
+    heights = []
+    for frame in frames:
+        pose = getattr(frame, pose_key)
+        if not pose:
+            continue
+        # Use nose or head-top as upper point, ankle as lower
+        head = pose.get("nose", {})
+        if head.get("confidence", 0) < _CONF_THRESHOLD:
+            head = pose.get("left_ear", {})
+        if head.get("confidence", 0) < _CONF_THRESHOLD:
+            continue
+        # Use the lower ankle (higher y value = lower on screen)
+        l_ankle = pose.get("left_ankle", {})
+        r_ankle = pose.get("right_ankle", {})
+        ankle = None
+        if (l_ankle.get("confidence", 0) >= _CONF_THRESHOLD
+                and r_ankle.get("confidence", 0) >= _CONF_THRESHOLD):
+            ankle = l_ankle if l_ankle["y"] > r_ankle["y"] else r_ankle
+        elif l_ankle.get("confidence", 0) >= _CONF_THRESHOLD:
+            ankle = l_ankle
+        elif r_ankle.get("confidence", 0) >= _CONF_THRESHOLD:
+            ankle = r_ankle
+        if not ankle:
+            continue
+        dx = (ankle["x"] - head["x"]) * ar
+        dy = ankle["y"] - head["y"]
+        h = math.sqrt(dx * dx + dy * dy)
+        if h > 0.05:  # sanity: at least 5% of frame
+            heights.append(h)
+
+    if len(heights) < 10:
+        return None
+
+    heights.sort()
+    median = heights[len(heights) // 2]
+    return median
+
+
 def _calibrate_blade_length_from_poses(frames: list, weapon: str, ar: float,
                                         pose_key: str) -> float:
-    """Measure blade length from max arm extension (generalized for any subject)."""
-    max_arm_len = 0.0
-    samples = 0
+    """Calibrate blade length using body height (primary) or arm segments (fallback).
+
+    Body-height calibration is preferred because head→ankle has minimal
+    foreshortening in side-profile fencing video (torso/legs are nearly
+    parallel to the image plane), unlike the weapon arm which frequently
+    extends in depth.
+    """
+    # Primary: body height calibration
+    body_height = _measure_body_height(frames, pose_key, ar)
+    if body_height is not None:
+        blade_length = body_height * _BLADE_HEIGHT_RATIO
+        logger.info("Blade length [%s]: %.3f (body height=%.3f, ratio=%.2f, %s)",
+                    pose_key, blade_length, body_height, _BLADE_HEIGHT_RATIO, "height-based")
+        return blade_length
+
+    # Fallback: arm-segment calibration
+    arm_lengths = []
     for frame in frames:
         pose = getattr(frame, pose_key)
         if not pose:
             continue
         wrist = pose.get(f"{weapon}_wrist", {})
+        elbow = pose.get(f"{weapon}_elbow", {})
         shoulder = pose.get(f"{weapon}_shoulder", {})
         if (wrist.get("confidence", 0) < _CONF_THRESHOLD
+                or elbow.get("confidence", 0) < _CONF_THRESHOLD
                 or shoulder.get("confidence", 0) < _CONF_THRESHOLD):
             continue
-        arm_dx = (wrist["x"] - shoulder["x"]) * ar
-        arm_dy = wrist["y"] - shoulder["y"]
-        arm_len = math.sqrt(arm_dx * arm_dx + arm_dy * arm_dy)
-        if arm_len > max_arm_len:
-            max_arm_len = arm_len
-        samples += 1
+        se_dx = (elbow["x"] - shoulder["x"]) * ar
+        se_dy = elbow["y"] - shoulder["y"]
+        ew_dx = (wrist["x"] - elbow["x"]) * ar
+        ew_dy = wrist["y"] - elbow["y"]
+        seg_len = (math.sqrt(se_dx * se_dx + se_dy * se_dy)
+                   + math.sqrt(ew_dx * ew_dx + ew_dy * ew_dy))
+        arm_lengths.append(seg_len)
 
-    if max_arm_len < 0.01:
+    if not arm_lengths or max(arm_lengths) < 0.01:
         blade_length = 0.3 * _BLADE_ARM_RATIO
+        logger.info("Blade length [%s]: %.3f (fallback, %d samples)",
+                    pose_key, blade_length, len(arm_lengths))
     else:
-        blade_length = max_arm_len * _BLADE_ARM_RATIO
-    logger.info("Blade length [%s]: %.3f (max arm=%.3f from %d samples)",
-                pose_key, blade_length, max_arm_len, samples)
+        arm_lengths.sort()
+        p90_idx = int(len(arm_lengths) * 0.90)
+        p90_arm = arm_lengths[min(p90_idx, len(arm_lengths) - 1)]
+        blade_length = p90_arm * _BLADE_ARM_RATIO
+        logger.info("Blade length [%s]: %.3f (p90 arm=%.3f, arm-based fallback, %d samples)",
+                    pose_key, blade_length, p90_arm, len(arm_lengths))
     return blade_length
 
 

@@ -124,14 +124,14 @@ def _project_direction_to_2d(
     return (sdx / smag, sdy / smag)
 
 
-def _calibrate_blade_length_3d(mesh_states: list, weapon: str) -> float | None:
-    """Calibrate blade length from 3D arm lengths (camera-angle-independent).
+def _get_median_3d_arm_length(mesh_states: list, weapon: str) -> float | None:
+    """Get median 3D arm length (shoulder→elbow + elbow→wrist) from WHAM data.
 
-    Returns blade_scale in normalised coordinates, or None if insufficient data.
+    The 3D arm length is nearly constant across frames (skeleton doesn't change),
+    so the median is a robust estimate of the true arm length in SMPL units.
+    Returns None if insufficient data.
     """
-    max_arm_len = 0.0
-    samples = 0
-
+    arm_lengths = []
     for ms in mesh_states:
         j3d = ms.joints_3d
         if not j3d:
@@ -141,20 +141,67 @@ def _calibrate_blade_length_3d(mesh_states: list, weapon: str) -> float | None:
         wrist = j3d.get(f"{weapon}_wrist")
         if not shoulder or not elbow or not wrist:
             continue
-
-        # 3D arm length: shoulder→elbow + elbow→wrist
         se = math.sqrt(sum((elbow[k] - shoulder[k]) ** 2 for k in ("x", "y", "z")))
         ew = math.sqrt(sum((wrist[k] - elbow[k]) ** 2 for k in ("x", "y", "z")))
-        arm_len = se + ew
-        if arm_len > max_arm_len:
-            max_arm_len = arm_len
-        samples += 1
+        arm_lengths.append(se + ew)
 
-    if samples < 5 or max_arm_len < 1e-4:
+    if len(arm_lengths) < 5:
         return None
 
-    logger.info("3D blade calibration: max arm=%.4f from %d samples", max_arm_len, samples)
-    return max_arm_len * _BLADE_ARM_RATIO
+    arm_lengths.sort()
+    median = arm_lengths[len(arm_lengths) // 2]
+    logger.info("3D median arm length: %.4f (%d samples)", median, len(arm_lengths))
+    return median
+
+
+def _compute_per_frame_blade_scale(
+    frame, pose_key: str, ms, weapon: str,
+    arm_3d_median: float, ar: float,
+) -> float | None:
+    """Compute per-frame blade scale using 3D foreshortening correction.
+
+    Compares the 2D projected arm length to the stable 3D arm length to
+    determine how much the arm (and blade) are foreshortened in this frame.
+    Returns blade_scale in normalised AR-corrected coordinates, or None.
+    """
+    pose = getattr(frame, pose_key) if isinstance(pose_key, str) else pose_key
+    if not pose:
+        return None
+
+    shoulder = pose.get(f"{weapon}_shoulder", {})
+    elbow = pose.get(f"{weapon}_elbow", {})
+    wrist = pose.get(f"{weapon}_wrist", {})
+
+    if (shoulder.get("confidence", 0) < 0.2
+            or elbow.get("confidence", 0) < 0.2
+            or wrist.get("confidence", 0) < 0.2):
+        return None
+
+    # 2D segmented arm: shoulder→elbow + elbow→wrist in AR-normalised space
+    se_dx = (elbow["x"] - shoulder["x"]) * ar
+    se_dy = elbow["y"] - shoulder["y"]
+    ew_dx = (wrist["x"] - elbow["x"]) * ar
+    ew_dy = wrist["y"] - elbow["y"]
+    arm_2d = (math.sqrt(se_dx**2 + se_dy**2)
+              + math.sqrt(ew_dx**2 + ew_dy**2))
+
+    if arm_2d < 0.01 or arm_3d_median < 1e-4:
+        return None
+
+    # Foreshortening ratio: how much of the 3D arm projects to 2D in this frame
+    # Ranges from ~0.5 (arm pointing at camera) to ~1.0 (arm parallel to image plane)
+    foreshortening = arm_2d / arm_3d_median
+
+    # Blade scale = true arm proportion * blade ratio * foreshortening
+    # But since arm_2d already encodes foreshortening:
+    #   blade_scale = arm_3d_median * BLADE_ARM_RATIO * foreshortening
+    #               = arm_3d_median * BLADE_ARM_RATIO * (arm_2d / arm_3d_median)
+    #               = arm_2d * BLADE_ARM_RATIO
+    # This is mathematically equivalent, but the key difference from Pass 1 is
+    # that this is PER-FRAME (arm_2d varies) instead of using a fixed P90.
+    blade_scale = arm_2d * _BLADE_ARM_RATIO
+
+    return blade_scale
 
 
 def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
@@ -164,9 +211,9 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
     Reads MeshState and BladeState rows from DB. For each frame with both:
     1. Compute 3D blade direction from wrist→hand vector
     2. Apply SMPL wrist rotation for true angulation
-    3. Project to 2D and recompute blade tip
-    4. Re-run Kalman filter over entire sequence with refined measurements
-    5. Update BladeState rows in-place
+    3. Compute per-frame blade scale using 3D arm foreshortening
+    4. Project to 2D and recompute blade tip
+    5. Re-run Kalman filter over entire sequence with refined measurements
 
     Returns: number of refined frames.
     """
@@ -189,10 +236,10 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
 
     frame_ids = [f.id for f in frames]
 
-    # Load existing blade states indexed by frame_id
+    # Load existing blade states indexed by frame_id (both subjects)
     blade_rows = (
         db.query(BladeState)
-        .filter(BladeState.frame_id.in_(frame_ids))
+        .filter(BladeState.frame_id.in_(frame_ids), BladeState.subject == "fencer")
         .all()
     )
     blade_by_frame = {bs.frame_id: bs for bs in blade_rows}
@@ -209,22 +256,20 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
         logger.info("Refinement: no fencer mesh states for bout %d", bout_id)
         return 0
 
-    # Determine weapon arm (reuse existing logic from Pass 1 via orientation)
-    if orientation is None:
-        from app.pipeline.orientation import detect_orientation
-        orientation = detect_orientation(frames)
+    # Determine weapon arm using position-based forward direction
+    from app.pipeline.blade import _compute_forward_sign, _determine_weapon_arm_from_poses
+    fwd_sign = _compute_forward_sign(frames, "fencer_pose", "opponent_pose")
+    weapon = _determine_weapon_arm_from_poses(frames, "fencer_pose", fwd_sign)
 
-    from app.pipeline.blade import _determine_weapon_arm
-    weapon = _determine_weapon_arm(frames, orientation)
+    # Get median 3D arm length (stable — skeleton doesn't change shape)
+    arm_3d_median = _get_median_3d_arm_length(mesh_rows, weapon)
+    if arm_3d_median is None:
+        logger.info("Refinement: insufficient 3D arm data for bout %d", bout_id)
+        return 0
 
-    # 3D blade length calibration
-    blade_scale_3d = _calibrate_blade_length_3d(mesh_rows, weapon)
-
-    # Fall back to Pass 1 blade scale from 2D if 3D calibration fails
-    if blade_scale_3d is None:
-        from app.pipeline.blade import _calibrate_blade_length
-        blade_scale_3d = _calibrate_blade_length(frames, weapon, ar)
-        logger.info("Refinement: using 2D blade scale fallback: %.4f", blade_scale_3d)
+    # Also get the Pass 1 blade scale for fallback
+    from app.pipeline.blade import _calibrate_blade_length_from_poses
+    pass1_blade_scale = _calibrate_blade_length_from_poses(frames, weapon, ar, "fencer_pose")
 
     # First pass: compute refined measurements for all frames that have mesh data
     refined_measurements: dict[int, tuple[float, float, float]] = {}  # frame_id → (tip_x, tip_y, confidence)
@@ -240,15 +285,6 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
 
         wrist_2d = pose.get(f"{weapon}_wrist", {})
         if wrist_2d.get("confidence", 0) < 0.1:
-            # Even if 2D wrist is weak, try to use it — WHAM has it in 3D
-            wrist_3d = ms.joints_3d.get(f"{weapon}_wrist")
-            if not wrist_3d:
-                continue
-            # Use Pass 1 tip if wrist is too weak for 2D positioning
-            bs = blade_by_frame.get(frame.id)
-            if not bs:
-                continue
-            # Keep the Pass 1 position — we can't re-project without a good 2D wrist
             continue
 
         wx, wy = wrist_2d["x"], wrist_2d["y"]
@@ -261,7 +297,6 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
         # Apply SMPL wrist rotation to refine direction
         if ms.body_pose and len(ms.body_pose) >= 63:
             wrist_rot = _extract_wrist_rotation(ms.body_pose, weapon)
-            # Rotate the 3D direction by wrist rotation
             dir_vec = np.array(dir_3d)
             rotated = wrist_rot @ dir_vec
             dir_3d = (float(rotated[0]), float(rotated[1]), float(rotated[2]))
@@ -277,10 +312,14 @@ def refine_blade_from_mesh(bout_id: int, db, video_info: dict,
 
         dx_screen, dy_screen = dir_2d
 
+        # Per-frame blade scale from 3D-corrected arm measurement
+        per_frame_scale = _compute_per_frame_blade_scale(
+            frame, "fencer_pose", ms, weapon, arm_3d_median, ar)
+        blade_scale = per_frame_scale if per_frame_scale else pass1_blade_scale
+
         # Project tip from 2D wrist position along projected direction
-        # Use Pass 1 blade_scale for consistency (normalised coordinates)
-        tip_x = wx + (dx_screen / ar) * blade_scale_3d
-        tip_y = wy + dy_screen * blade_scale_3d
+        tip_x = wx + (dx_screen / ar) * blade_scale
+        tip_y = wy + dy_screen * blade_scale
 
         # Confidence: base it on 2D wrist confidence (we know the 3D data is good)
         wrist_conf = wrist_2d.get("confidence", 0.5)

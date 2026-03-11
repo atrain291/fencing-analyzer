@@ -33,7 +33,8 @@ _BLADE_PREP_THRESHOLD = 0.15     # blade speed below this during foot movement =
 
 
 def run_action_classification(bout_id: int, frames: list, db,
-                              blade_speeds: dict[int, dict] | None = None) -> list[dict]:
+                              blade_speeds: dict[int, dict] | None = None,
+                              opponent_blade_speeds: dict[int, dict] | None = None) -> list[dict]:
     """
     Classify fencing actions from per-frame ankle positions and blade speed.
     Runs classification for both fencer and opponent poses.
@@ -44,24 +45,29 @@ def run_action_classification(bout_id: int, frames: list, db,
 
     orientation = detect_orientation(frames)
 
-    # Build a timestamp->blade_speed lookup if blade data is available
-    blade_by_ts: dict[int, float] = {}
-    if blade_speeds:
-        for frame in frames:
-            bs = blade_speeds.get(frame.id)
-            if bs and bs.get("speed") is not None:
-                blade_by_ts[frame.timestamp_ms] = bs["speed"]
+    # Build timestamp->blade_speed lookups
+    def _build_blade_lookup(speeds: dict[int, dict] | None) -> dict[int, float]:
+        lookup: dict[int, float] = {}
+        if speeds:
+            for frame in frames:
+                bs = speeds.get(frame.id)
+                if bs and bs.get("speed") is not None:
+                    lookup[frame.timestamp_ms] = bs["speed"]
+        return lookup
+
+    fencer_blade_by_ts = _build_blade_lookup(blade_speeds)
+    opponent_blade_by_ts = _build_blade_lookup(opponent_blade_speeds)
 
     all_actions = []
 
     # Classify fencer actions
-    fencer_actions = _classify_subject(frames, orientation, blade_by_ts, pose_key="fencer_pose")
+    fencer_actions = _classify_subject(frames, orientation, fencer_blade_by_ts, pose_key="fencer_pose")
     for a in fencer_actions:
         a["subject"] = "fencer"
     all_actions.extend(fencer_actions)
 
-    # Classify opponent actions (no blade data for opponent)
-    opponent_actions = _classify_subject(frames, orientation, blade_by_ts={}, pose_key="opponent_pose")
+    # Classify opponent actions (now with blade data)
+    opponent_actions = _classify_subject(frames, orientation, opponent_blade_by_ts, pose_key="opponent_pose")
     for a in opponent_actions:
         a["subject"] = "opponent"
     all_actions.extend(opponent_actions)

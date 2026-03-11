@@ -184,15 +184,19 @@ def run_pipeline(self, bout_id: int, video_path: str):
             from app.models.analysis import BladeState
             blade_rows = (db.query(BladeState)
                           .join(Frame, BladeState.frame_id == Frame.id)
-                          .filter(Frame.bout_id == bout_id,
-                                  BladeState.subject == "fencer")
+                          .filter(Frame.bout_id == bout_id)
                           .all())
-            blade_speeds = {
+            fencer_blade_speeds = {
                 bs.frame_id: {"speed": bs.speed, "confidence": bs.confidence}
-                for bs in blade_rows
+                for bs in blade_rows if bs.subject == "fencer"
+            }
+            opponent_blade_speeds = {
+                bs.frame_id: {"speed": bs.speed, "confidence": bs.confidence}
+                for bs in blade_rows if bs.subject == "opponent"
             }
             action_results = run_action_classification(bout_id, frames, db,
-                                                       blade_speeds=blade_speeds)
+                                                       blade_speeds=fencer_blade_speeds,
+                                                       opponent_blade_speeds=opponent_blade_speeds)
             logger.info("Action classification complete: %d actions", len(action_results))
 
             # Stage 5 — LLM synthesis (DISABLED — skip to complete)
