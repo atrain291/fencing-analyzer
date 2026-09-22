@@ -2,6 +2,10 @@
 
 > Read this file at the start of every new Claude Code session to restore full context.
 
+## Research update — 2026-09-22
+
+The current research targets existing single-camera bout videos. Start with the [code and technology review](documents/technology-review-2026-09-22.md) and [new model research and proposed evaluation](documents/model-research-and-evaluation-plan-2026-09-22.md). They document correctness issues, current model candidates, published benchmark conditions, and the proposed comparison on real footage. Code findings refer to snapshot `9ca863f`; newer remote changes through `4898c71` were integrated on September 23, so recheck findings before making fixes. The updated first pose comparison is YOLOv8 nano, YOLO26 medium, and RF-DETR Keypoint Preview, followed by selected Human3R and Fast SAM 3D Body experiments. Representative footage is still needed; no implementation changes or GPU benchmarks were made during this review. The deployment notes below retain their historical March 2026 status.
+
 ---
 
 ## What This Project Is
