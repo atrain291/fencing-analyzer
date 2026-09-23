@@ -130,15 +130,6 @@ export default function VideoReview() {
   }
 
   useEffect(() => {
-    if (!boutId) return
-    getBout(Number(boutId)).then((data) => {
-      if (data.video_url) setVideoUrl(data.video_url)
-      if ((data as any).analysis) setAnalysis((data as any).analysis)
-      if (data.frames) setFrames(data.frames)
-    })
-  }, [boutId])
-
-  useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement)
     document.addEventListener('fullscreenchange', onFsChange)
     return () => document.removeEventListener('fullscreenchange', onFsChange)
@@ -181,6 +172,25 @@ export default function VideoReview() {
     if (fencerPose) drawSkeleton(ctx, fencerPose, canvas.width, canvas.height, '#f97316')
     if (opponentPose) drawSkeleton(ctx, opponentPose, canvas.width, canvas.height, '#3b82f6')
   }, [])
+
+  useEffect(() => {
+    let active = true
+    framesRef.current = []
+    setVideoUrl('')
+    setFrames([])
+    setAnalysis(null)
+    renderSkeleton()
+    if (boutId) {
+      getBout(Number(boutId)).then((data) => {
+        if (!active) return
+        const response = data as typeof data & { analysis?: AnalysisSummary | null }
+        setVideoUrl(response.video_url ?? '')
+        setFrames(Array.isArray(response.frames) ? response.frames : [])
+        setAnalysis(response.analysis ?? null)
+      })
+    }
+    return () => { active = false }
+  }, [boutId, renderSkeleton])
 
   useEffect(() => {
     framesRef.current = frames

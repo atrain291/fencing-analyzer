@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, waitFor } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Bout, Frame, Keypoint } from '@/api/bouts'
 import { getBout } from '@/api/bouts'
@@ -32,12 +32,18 @@ function mount(frames: Frame[]) {
 function mountPage() {
   const view = render(
     <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={['/bouts/1']}>
+      <RouteSwitcher />
       <Routes><Route path="/bouts/:boutId" element={<VideoReview />} /></Routes>
     </MemoryRouter>,
   )
   const video = view.container.querySelector('video')!
   const canvas = view.container.querySelector('canvas')!
   return { ...view, video, canvas }
+}
+
+function RouteSwitcher() {
+  const navigate = useNavigate()
+  return <button onClick={() => navigate('/bouts/2')}>Open bout 2</button>
 }
 
 let currentTime = 0
@@ -80,6 +86,51 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('VideoReview overlay', () => {
+  it('clears the prior bout immediately and keeps empty values from a sparse response', async () => {
+    let resolveSecond!: (value: Bout) => void
+    vi.mocked(getBout).mockImplementation(id => id === 1
+      ? Promise.resolve({
+        ...bout([frame(0, { nose: point(0.5) })]),
+        analysis: { llm_summary: 'Prior feedback', technique_scores: {} },
+      })
+      : new Promise(resolve => { resolveSecond = resolve }))
+    const { video, canvas, getByText } = mountPage()
+    await waitFor(() => expect(getByText('Skeleton overlay active — 1 frames loaded')).toBeTruthy())
+    expect(video.getAttribute('src')).toBe('/uploads/test.mp4')
+    expect(getByText('Prior feedback')).toBeTruthy()
+    ctx.clearRect.mockClear()
+    await act(async () => { fireEvent.click(getByText('Open bout 2')) })
+    expect(getByText('No pose data available')).toBeTruthy()
+    expect(video.getAttribute('src')).toBe('')
+    expect(canvas.style.width).toBe('0px')
+    expect(ctx.clearRect).toHaveBeenCalled()
+    expect(getByText('Loading analysis...')).toBeTruthy()
+    await act(async () => {
+      resolveSecond({ ...bout([]), id: 2, video_url: null, frames: undefined } as unknown as Bout)
+    })
+    expect(getByText('No pose data available')).toBeTruthy()
+    expect(video.getAttribute('src')).toBe('')
+  })
+
+  it('ignores a prior bout response that arrives after the new bout', async () => {
+    let resolveFirst!: (value: Bout) => void
+    let resolveSecond!: (value: Bout) => void
+    vi.mocked(getBout).mockImplementation(id => new Promise(resolve => {
+      if (id === 1) resolveFirst = resolve
+      else resolveSecond = resolve
+    }))
+    const { video, getByText } = mountPage()
+    await act(async () => { fireEvent.click(getByText('Open bout 2')) })
+    await act(async () => {
+      resolveSecond({ ...bout([frame(0, { nose: point(0.8) })]), id: 2, video_url: '/uploads/second.mp4' })
+    })
+    expect(video.getAttribute('src')).toBe('/uploads/second.mp4')
+    expect(getByText('Skeleton overlay active — 1 frames loaded')).toBeTruthy()
+    await act(async () => { resolveFirst(bout([frame(0, { nose: point(0.2) }), frame(50, {})])) })
+    expect(video.getAttribute('src')).toBe('/uploads/second.mp4')
+    expect(getByText('Skeleton overlay active — 1 frames loaded')).toBeTruthy()
+  })
+
   it('interpolates depth for shared joints without inventing absent joints', () => {
     const a = frame(0, { nose: { ...point(0.2), z: 0.1 }, left_wrist: point(0.1) })
     const b = frame(100, { nose: { ...point(0.8), z: 0.7 } })
