@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
     anthropic==0.40.0 \
     httpx==0.27.2 \
     opencv-python-headless==4.10.0.84 \
-    ffmpeg-python==0.2.0
+    ffmpeg-python==0.2.0 \
+    av==18.1.0
 
 COPY . .
