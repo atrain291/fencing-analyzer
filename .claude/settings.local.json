@@ -3,6 +3,7 @@
     "allow": [
       "Bash(podman-compose up:*)",
       "Bash(podman image ls:*)",
+      "Bash(podman info:*)",
       "Bash(sysctl:*)",
       "Bash(podman build:*)",
       "Bash(podman-compose config:*)",
