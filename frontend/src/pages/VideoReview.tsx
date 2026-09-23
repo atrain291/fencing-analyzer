@@ -50,7 +50,7 @@ function drawSkeleton(
 
   // Draw keypoints
   ctx.globalAlpha = 1
-  for (const [name, kp] of Object.entries(pose)) {
+  for (const kp of Object.values(pose)) {
     if (kp.confidence < CONFIDENCE_THRESHOLD) continue
 
     ctx.globalAlpha = kp.confidence
@@ -62,18 +62,15 @@ function drawSkeleton(
   ctx.globalAlpha = 1
 }
 
-function findFrameInterval(
+export function samplePose(
   frames: Frame[],
-  timestampMs: number
-): { a: Frame; b: Frame; t: number } | null {
+  timestampMs: number,
+  role: 'fencer_pose' | 'opponent_pose',
+): Record<string, Keypoint> | null {
   if (frames.length === 0) return null
-  if (frames.length === 1) return { a: frames[0], b: frames[0], t: 0 }
-
   let lo = 0
   let hi = frames.length - 1
-
-  if (timestampMs <= frames[lo].timestamp_ms) return { a: frames[lo], b: frames[lo], t: 0 }
-  if (timestampMs >= frames[hi].timestamp_ms) return { a: frames[hi], b: frames[hi], t: 0 }
+  if (timestampMs < frames[lo].timestamp_ms || timestampMs > frames[hi].timestamp_ms) return null
 
   while (lo + 1 < hi) {
     const mid = (lo + hi) >>> 1
@@ -86,27 +83,20 @@ function findFrameInterval(
 
   const a = frames[lo]
   const b = frames[hi]
+  if (timestampMs === a.timestamp_ms) return a[role] || null
+  if (timestampMs === b.timestamp_ms) return b[role] || null
   const span = b.timestamp_ms - a.timestamp_ms
-  const t = span > 0 ? (timestampMs - a.timestamp_ms) / span : 0
-  return { a, b, t }
-}
-
-function interpolatePose(
-  a: Record<string, Keypoint>,
-  b: Record<string, Keypoint>,
-  t: number
-): Record<string, Keypoint> {
+  if (span <= 0 || span > 100 || !a[role] || !b[role]) return null
+  const t = (timestampMs - a.timestamp_ms) / span
   const result: Record<string, Keypoint> = {}
-  for (const name of Object.keys(a)) {
-    const ka = a[name]
-    const kb = b[name]
-    if (!kb) {
-      result[name] = ka
-      continue
-    }
+  for (const name of Object.keys(a[role])) {
+    const ka = a[role][name]
+    const kb = b[role][name]
+    if (!kb) continue
     result[name] = {
       x: ka.x + (kb.x - ka.x) * t,
       y: ka.y + (kb.y - ka.y) * t,
+      z: ka.z + (kb.z - ka.z) * t,
       confidence: Math.min(ka.confidence, kb.confidence),
     }
   }
@@ -125,7 +115,6 @@ export default function VideoReview() {
   const [speed, setSpeed] = useState(1)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const framesRef = useRef<Frame[]>([])
-  const rafRef = useRef<number | null>(null)
 
   function handleSpeed(s: number) {
     setSpeed(s)
@@ -139,10 +128,6 @@ export default function VideoReview() {
       document.exitFullscreen()
     }
   }
-
-  useEffect(() => {
-    framesRef.current = frames
-  }, [frames])
 
   useEffect(() => {
     if (!boutId) return
@@ -159,52 +144,55 @@ export default function VideoReview() {
     return () => document.removeEventListener('fullscreenchange', onFsChange)
   }, [])
 
-  const renderSkeleton = useCallback(() => {
+  const renderSkeleton = useCallback((timestampMs?: number) => {
     const video = videoRef.current
     const canvas = canvasRef.current
-    const currentFrames = framesRef.current
-    if (!video || !canvas || currentFrames.length === 0) return
-
+    if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+    if (!video || !video.getAttribute('src') || !video.videoWidth || !video.videoHeight) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      canvas.style.width = '0px'
+      canvas.style.height = '0px'
+      return
+    }
 
-    // Sync canvas size with video
+    const videoRect = video.getBoundingClientRect()
+    const containerRect = containerRef.current?.getBoundingClientRect()
+    if (!containerRect || !videoRect.width || !videoRect.height) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      return
+    }
+    const scale = Math.min(videoRect.width / video.videoWidth, videoRect.height / video.videoHeight)
+    const displayWidth = video.videoWidth * scale
+    const displayHeight = video.videoHeight * scale
+    canvas.style.left = `${videoRect.left - containerRect.left + (videoRect.width - displayWidth) / 2}px`
+    canvas.style.top = `${videoRect.top - containerRect.top + (videoRect.height - displayHeight) / 2}px`
+    canvas.style.width = `${displayWidth}px`
+    canvas.style.height = `${displayHeight}px`
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth || video.clientWidth
-      canvas.height = video.videoHeight || video.clientHeight
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
     }
-
-    // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    const currentTimeMs = video.currentTime * 1000
-    const interval = findFrameInterval(currentFrames, currentTimeMs)
-    if (!interval) return
-
-    const { a, b, t } = interval
-
-    // Draw fencer skeleton (orange)
-    if (a.fencer_pose) {
-      const pose = b.fencer_pose
-        ? interpolatePose(a.fencer_pose, b.fencer_pose, t)
-        : a.fencer_pose
-      drawSkeleton(ctx, pose, canvas.width, canvas.height, '#f97316')
-    }
-
-    // Draw opponent skeleton (blue)
-    if (a.opponent_pose) {
-      const pose = b.opponent_pose
-        ? interpolatePose(a.opponent_pose, b.opponent_pose, t)
-        : a.opponent_pose
-      drawSkeleton(ctx, pose, canvas.width, canvas.height, '#3b82f6')
-    }
+    const timeMs = timestampMs ?? video.currentTime * 1000
+    const fencerPose = samplePose(framesRef.current, timeMs, 'fencer_pose')
+    const opponentPose = samplePose(framesRef.current, timeMs, 'opponent_pose')
+    if (fencerPose) drawSkeleton(ctx, fencerPose, canvas.width, canvas.height, '#f97316')
+    if (opponentPose) drawSkeleton(ctx, opponentPose, canvas.width, canvas.height, '#3b82f6')
   }, [])
+
+  useEffect(() => {
+    framesRef.current = frames
+    renderSkeleton()
+  }, [frames, renderSkeleton])
 
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     const ro = new ResizeObserver(() => renderSkeleton())
     ro.observe(container)
+    if (videoRef.current) ro.observe(videoRef.current)
     return () => ro.disconnect()
   }, [renderSkeleton])
 
@@ -212,19 +200,42 @@ export default function VideoReview() {
     const video = videoRef.current
     if (!video) return
 
-    const startLoop = () => {
-      const loop = () => {
-        renderSkeleton()
-        rafRef.current = requestAnimationFrame(loop)
+    let running = false
+    let frameCallbackId: number | null = null
+    let rafId: number | null = null
+
+    const schedule = () => {
+      if (!running) return
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        frameCallbackId = video.requestVideoFrameCallback((_now, metadata) => {
+          frameCallbackId = null
+          if (!running) return
+          renderSkeleton(metadata.mediaTime * 1000)
+          schedule()
+        })
+      } else {
+        rafId = requestAnimationFrame(() => {
+          rafId = null
+          if (!running) return
+          renderSkeleton()
+          schedule()
+        })
       }
-      rafRef.current = requestAnimationFrame(loop)
+    }
+
+    const startLoop = () => {
+      if (running) return
+      running = true
+      renderSkeleton()
+      schedule()
     }
 
     const stopLoop = () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current)
-        rafRef.current = null
-      }
+      running = false
+      if (frameCallbackId !== null) video.cancelVideoFrameCallback(frameCallbackId)
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      frameCallbackId = null
+      rafId = null
     }
 
     const handlePlay = () => startLoop()
@@ -238,6 +249,8 @@ export default function VideoReview() {
     video.addEventListener('ended', handleEnded)
     video.addEventListener('seeked', handleSeeked)
     video.addEventListener('loadedmetadata', handleLoadedMetadata)
+
+    if (!video.paused && !video.ended) startLoop()
 
     return () => {
       stopLoop()
@@ -270,7 +283,7 @@ export default function VideoReview() {
         <div className="lg:col-span-3 space-y-3">
           <div
             ref={containerRef}
-            className={`relative bg-black rounded-xl overflow-hidden aspect-video ${isFullscreen ? 'rounded-none' : ''}`}
+            className={`relative bg-black rounded-xl overflow-hidden aspect-video ${isFullscreen ? 'rounded-none w-screen h-screen' : ''}`}
           >
             <button
               onClick={toggleFullscreen}
@@ -287,7 +300,7 @@ export default function VideoReview() {
             />
             <canvas
               ref={canvasRef}
-              className="absolute inset-0 w-full h-full pointer-events-none"
+              className="absolute pointer-events-none"
             />
           </div>
           <div className="flex items-center gap-2">

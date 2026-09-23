@@ -6,30 +6,34 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc -b && vite build",
+    "test": "vitest run --maxWorkers=1 --minWorkers=1",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx"
   },
   "dependencies": {
+    "@react-three/drei": "^9.112.0",
+    "@react-three/fiber": "^8.17.10",
+    "axios": "^1.7.7",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.446.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.2",
-    "axios": "^1.7.7",
     "recharts": "^2.12.7",
-    "three": "^0.168.0",
-    "@react-three/fiber": "^8.17.10",
-    "@react-three/drei": "^9.112.0",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.446.0"
+    "three": "^0.168.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^18.3.10",
     "@types/react-dom": "^18.3.0",
     "@types/three": "^0.168.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
+    "jsdom": "^25.0.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
     "typescript": "^5.5.3",
-    "vite": "^5.4.8"
+    "vite": "^5.4.8",
+    "vitest": "^2.1.9"
   }
 }
