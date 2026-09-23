@@ -1,0 +1,7 @@
+# Python 3.11+. Install a matched torch/torchvision pair for your GPU separately.
+# These are evaluation dependencies, not a replacement for worker/requirements.txt.
+numpy>=1.26,<3
+av==18.1.0
+supervision==0.30.5
+ultralytics==8.4.160
+rfdetr==1.10.1

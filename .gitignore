@@ -29,11 +29,22 @@ uploads/
 *.mp4
 *.mov
 *.avi
+*.mkv
+*.webm
 
 # ML model weights
 *.pt
 *.pth
 *.onnx
+*.safetensors
+
+# Evaluation data, environments, and browser verification artifacts
+.venv-eval/
+evaluation/results/
+evaluation/*.local.json
+output/playwright/
+.playwright-cli/
+*.tsbuildinfo
 
 # Claude Code
 .claude/settings.local.json

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fencing pose comparison</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:light;font-family:"Segoe UI",Arial,sans-serif;color:#17283a;background:#eef3f6;font-size:16px}
+*{box-sizing:border-box}body{margin:0}main{max-width:1550px;margin:auto;padding:32px clamp(16px,3vw,48px)}
+h1{font-size:clamp(28px,3vw,44px);font-weight:600;letter-spacing:-1px;margin:0 0 10px}h2{font-size:18px;font-weight:600}
+p{max-width:78ch;line-height:1.6}header{border-bottom:3px solid #2464c6;padding-bottom:20px}
+.muted{color:#516475}.notice{border-left:4px solid #e27631;background:#fff;padding:12px 18px}
+.controls{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:22px 0}label{font-weight:600}
+input,select,button{font:inherit}input[type=file]{max-width:100%;font-size:14px}button,select{padding:8px 12px;border:1px solid #a1b2c1;background:#fff;border-radius:4px;color:#17283a;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #2464c6;outline-offset:3px}
+button:disabled{opacity:.5;cursor:default}.master{display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin-bottom:24px}
+video{width:min(440px,100%);max-height:260px;background:#17283a}.frame-info{font-variant-numeric:tabular-nums;font-size:20px}
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:20px;align-items:start}
+.panel h2{margin:0;padding:12px 0;border-top:2px solid #a1b2c1}.panel canvas{display:block;width:100%;background:#17283a;aspect-ratio:16/9}
+.panel p{font-size:14px;margin:8px 0}.table-wrap{overflow:auto;margin:28px 0}table{border-collapse:collapse;width:100%;font-size:14px;background:#fff}
+th,td{padding:13px 16px;text-align:left;border-bottom:1px solid #d8e1e8;font-variant-numeric:tabular-nums;white-space:nowrap}th{background:#dce6ef;font-weight:600}
+details{margin-top:20px}summary{cursor:pointer;font-weight:600}pre{overflow:auto;max-height:360px;background:white;padding:18px;font-size:12px}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:14px}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:#2464c6}
+.dot.orange{background:#e27631}footer{margin-top:32px;font-size:13px;color:#516475}a{color:#1556ae}
+</style>
+</head>
+<body><main>
+<header><h1>Compare the same exchange.</h1><p class="muted" id="source"></p></header>
+<p class="notice" id="notice"></p>
+<div class="controls">
+  <label>Open the original video <input id="file" type="file" accept="video/*,.mkv"></label>
+  <label>Playback <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+  <label>Joint threshold <input id="threshold" type="range" min="0" max="1" step="0.05" value="0.3"> <output id="threshold-value">0.30</output></label>
+</div>
+<p id="status" role="status">Select the original video to begin. It stays on this computer.</p>
+<div class="master"><video id="video" controls playsinline preload="metadata"></video><div>
+<p class="frame-info" id="frame-info">No video loaded</p><button id="previous" disabled>Previous frame</button> <button id="next" disabled>Next frame</button>
+<p class="muted">One source video drives every panel.</p></div></div>
+<div class="panels" id="panels"></div>
+<p class="legend"><span><span class="dot"></span>Even track ID</span><span><span class="dot orange"></span>Odd track ID</span><span>Track IDs belong to each model run; matching colors do not establish matching people.</span></p>
+<div class="table-wrap"><table><thead><tr><th>Model</th><th>Prediction median</th><th>Prediction p95</th><th>Tracking mean</th><th>Frames with ≥2 people</th><th>Labeled joint error</th><th>Visible joint recall</th><th>Joints matched / labeled</th><th>Labeled ID changes</th></tr></thead><tbody id="metrics"></tbody></table></div>
+<p class="muted">Coverage includes background people. Joint confidence means different things across models; the threshold only controls display. Accuracy metrics use a fixed 0.30 threshold and explicit person/track annotations. Missing labels show “Not measured.” ID changes count changes between labeled observations, not a full MOT benchmark. Smooth-looking motion is not proof of accurate pose.</p>
+<details><summary>Run conditions and source fingerprint</summary><pre id="provenance"></pre></details>
+<footer>Published benchmark scores are not substituted for measurements on this clip. Predictions, timestamps, and run conditions are preserved in the neighboring model JSON files.</footer>
+</main>
+<script id="results" type="application/json">__RESULTS_JSON__</script>
+<script>
+'use strict';
+const runs=JSON.parse(document.querySelector('#results').textContent), source=runs[0].source;
+const video=document.querySelector('#video'), status=document.querySelector('#status');
+const byId=id=>document.getElementById(id), frames=runs[0].frames;
+const edgePairs=[['left_shoulder','right_shoulder'],['left_shoulder','left_elbow'],['left_elbow','left_wrist'],['right_shoulder','right_elbow'],['right_elbow','right_wrist'],['left_shoulder','left_hip'],['right_shoulder','right_hip'],['left_hip','right_hip'],['left_hip','left_knee'],['left_knee','left_ankle'],['right_hip','right_knee'],['right_knee','right_ankle']];
+let objectUrl=null,pending=null,pendingKind=null,displayTime=0;
+byId('source').textContent=`${source.name} • ${source.start_s.toFixed(2)}–${source.end_s.toFixed(2)} s • ${frames.length} decoded frames`;
+byId('notice').textContent=runs.some(r=>r.provenance.synthetic)?'Synthetic validation fixture. These outputs test the tooling and are not model performance results.':'Recorded model predictions. Compare visible joints and tracking before choosing a model.';
+const number=(value,suffix='',digits=2)=>value==null?'Not measured':Number(value).toFixed(digits)+suffix;
+const percent=value=>value==null?'Not measured':number(value*100,'%',1);
+const panels=runs.map(run=>{
+  const panel=document.createElement('section');panel.className='panel';
+  const heading=document.createElement('h2');heading.textContent=run.provenance.model_id;
+  const canvas=document.createElement('canvas');canvas.width=frames[0].width;canvas.height=frames[0].height;canvas.style.aspectRatio=`${canvas.width}/${canvas.height}`;
+  const caption=document.createElement('p');caption.className='muted';caption.textContent='Waiting for the original video';
+  panel.append(heading,canvas,caption);byId('panels').append(panel);
+  const row=document.createElement('tr'),s=run.summary,m=run.metrics;
+  const labelCounts=m.annotated_visible_joints?`${m.matched_visible_joints} / ${m.annotated_visible_joints}`:'Not measured';
+  for(const text of [run.provenance.model_id,number(s.median_prediction_ms,' ms'),number(s.p95_prediction_ms,' ms'),number(s.mean_tracking_ms,' ms'),percent(m.frames_with_two_or_more_people_fraction),number(m.mean_visible_joint_error_px,' px'),percent(m.visible_joint_recall),labelCounts,number(m.labeled_id_switches,'',0)]){const cell=document.createElement('td');cell.textContent=text;row.append(cell)}
+  byId('metrics').append(row);return{run,canvas,caption};
+});
+byId('provenance').textContent=JSON.stringify(runs.map(r=>({source:r.source,provenance:r.provenance,summary:r.summary,metrics:r.metrics,annotation_sha256:r.annotation_sha256})),null,2);
+function frameAt(time){
+  const ms=time*1000;if(ms<frames[0].timestamp_ms-0.5||time>=source.end_s)return -1;
+  let lo=0,hi=frames.length;while(lo<hi){const mid=(lo+hi)>>>1;if(frames[mid].timestamp_ms<=ms+0.5)lo=mid+1;else hi=mid}
+  return lo-1;
+}
+function paint(time=video.currentTime){
+  displayTime=time;const index=frameAt(time),threshold=Number(byId('threshold').value);
+  byId('frame-info').textContent=index<0?'Outside evaluated interval':`Frame ${frames[index].frame_index} • ${(frames[index].timestamp_ms/1000).toFixed(3)} s`;
+  for(const{run,canvas,caption}of panels){
+    const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(video.readyState<2)continue;
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    if(index<0){caption.textContent='No pose data for this time';continue}
+    const frame=run.frames[index];caption.textContent=`${frame.detections.length} people detected • ${frame.detections.filter(d=>d.track_id!=null).length} tracks`;
+    for(const detection of frame.detections){
+      const color=detection.track_id==null?'#a1b2c1':detection.track_id%2?'#e27631':'#2464c6';ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=Math.max(2,canvas.width/400);
+      const point=name=>{const p=detection.keypoints[name];return p&&p.confidence>=threshold?p:null};
+      for(const[a,b]of edgePairs){const p=point(a),q=point(b);if(!p||!q)continue;ctx.beginPath();ctx.moveTo(p.x*canvas.width,p.y*canvas.height);ctx.lineTo(q.x*canvas.width,q.y*canvas.height);ctx.stroke()}
+      for(const p of Object.values(detection.keypoints)){if(p.confidence<threshold)continue;ctx.beginPath();ctx.arc(p.x*canvas.width,p.y*canvas.height,Math.max(3,canvas.width/250),0,Math.PI*2);ctx.fill()}
+      const[x,y,x2,y2]=detection.box;ctx.strokeRect(x*canvas.width,y*canvas.height,(x2-x)*canvas.width,(y2-y)*canvas.height);
+      ctx.font=`600 ${Math.max(14,canvas.width/45)}px Segoe UI, sans-serif`;const label=detection.track_id==null?'Untracked':`Track ${detection.track_id}`;
+      ctx.fillText(label,Math.max(2,x*canvas.width),Math.max(18,y*canvas.height-6));
+    }
+  }
+}
+function stop(){if(pending!==null){if(pendingKind==='video')video.cancelVideoFrameCallback(pending);else cancelAnimationFrame(pending);pending=null}}
+function schedule(){
+  if(pending!==null||video.paused||video.ended)return;
+  if('requestVideoFrameCallback'in video){pendingKind='video';pending=video.requestVideoFrameCallback((_,metadata)=>{pending=null;paint(metadata.mediaTime);if(metadata.mediaTime>=source.end_s)video.pause();else schedule()})}
+  else{pendingKind='raf';pending=requestAnimationFrame(()=>{pending=null;paint(video.currentTime);if(video.currentTime>=source.end_s)video.pause();else schedule()})}
+}
+function seek(index){video.pause();video.currentTime=frames[Math.max(0,Math.min(frames.length-1,index))].timestamp_ms/1000+0.000001}
+byId('previous').onclick=()=>seek(frameAt(displayTime)-1);byId('next').onclick=()=>seek(frameAt(displayTime)+1);
+byId('speed').onchange=()=>{video.playbackRate=Number(byId('speed').value)};
+byId('threshold').oninput=()=>{byId('threshold-value').textContent=Number(byId('threshold').value).toFixed(2);paint(displayTime)};
+byId('file').onchange=event=>{
+  const file=event.target.files[0];if(!file)return;
+  stop();video.pause();video.removeAttribute('src');video.load();for(const p of panels)p.canvas.getContext('2d').clearRect(0,0,p.canvas.width,p.canvas.height);
+  byId('previous').disabled=byId('next').disabled=true;if(objectUrl)URL.revokeObjectURL(objectUrl);
+  if(source.size_bytes!=null&&file.size!==source.size_bytes){status.textContent='This file has a different size from the evaluated source. Select the original video.';return}
+  objectUrl=URL.createObjectURL(file);video.src=objectUrl;
+  status.textContent=`Loaded ${file.name}. Check that this is the evaluated source; file size is checked, content is not rehashed in the browser.`;
+};
+video.addEventListener('loadedmetadata',()=>{
+  if(video.videoWidth!==frames[0].width||video.videoHeight!==frames[0].height){status.textContent='Video dimensions differ from the evaluated upright frames. Select the correct original or normalize its rotation before evaluation.';video.removeAttribute('src');video.load();return}
+  byId('previous').disabled=byId('next').disabled=false;video.playbackRate=Number(byId('speed').value);seek(0);
+});
+video.addEventListener('seeked',()=>paint());video.addEventListener('loadeddata',()=>paint());
+video.addEventListener('play',()=>{if(video.currentTime>=source.end_s)video.currentTime=frames[0].timestamp_ms/1000;schedule()});
+video.addEventListener('pause',stop);video.addEventListener('ended',stop);
+video.addEventListener('error',()=>{stop();status.textContent='The browser could not decode this video. Create a browser-compatible analysis copy and evaluate that same copy.'});
+window.addEventListener('beforeunload',()=>{stop();if(objectUrl)URL.revokeObjectURL(objectUrl)});
+</script></body></html>

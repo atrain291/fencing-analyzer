@@ -1,0 +1,16 @@
+{
+  "clips": [
+    {
+      "id": "clear-footwork",
+      "video": "/path/to/original-bout.mp4",
+      "start_s": 20,
+      "end_s": 30
+    },
+    {
+      "id": "overlapping-lunge",
+      "video": "/path/to/original-bout.mp4",
+      "start_s": 45,
+      "end_s": 55
+    }
+  ]
+}

@@ -2,6 +2,14 @@
 
 > Read this file at the start of every new Claude Code session to restore full context.
 
+## Evaluation implementation — 2026-09-23
+
+The `codex/pose-evaluation` branch implements the first 2D comparison milestone. See [evaluation commands and limits](evaluation/README.md), the [design](docs/superpowers/specs/2026-09-23-pose-evaluation-design.md), and the [implementation checklist](docs/superpowers/plans/2026-09-23-pose-evaluation.md). The worker now preserves presentation timestamps and maps tracked participants conservatively; the review overlay fixes video geometry, frame sampling, and stale state during bout navigation. A standalone CLI compares YOLOv8n, YOLO26m, and RF-DETR Keypoint with a shared decoder/tracker and offline report. The production model selection remains unchanged.
+
+Validation: 22 Python tests, 9 frontend tests, and the frontend build passed. All three official checkpoints completed CPU API smoke runs, including nonempty output conversion. Chrome report playback and frame stepping were checked with synthetic video. These are implementation checks, not fencing-quality results. GPU performance, actual footage, production-container validation, and application fullscreen visual validation remain open.
+
+The user says the videos are on Omarchy, username `adeitz`. SSH from this Windows machine to `adeitz@omarchy` reached the host but failed authentication (`Permission denied (publickey,password)`). A working SSH alias/key/port or key authorization is needed, followed by the footage location. Continue in an isolated evaluation environment; do not restart the historical application services merely because the older handoff below suggests it. No live services or databases were changed during this milestone.
+
 ## Research update — 2026-09-22
 
 The current research targets existing single-camera bout videos. Start with the [code and technology review](documents/technology-review-2026-09-22.md) and [new model research and proposed evaluation](documents/model-research-and-evaluation-plan-2026-09-22.md). They document correctness issues, current model candidates, published benchmark conditions, and the proposed comparison on real footage. Code findings refer to snapshot `9ca863f`; newer remote changes through `4898c71` were integrated on September 23, so recheck findings before making fixes. The updated first pose comparison is YOLOv8 nano, YOLO26 medium, and RF-DETR Keypoint Preview, followed by selected Human3R and Fast SAM 3D Body experiments. Representative footage is still needed; no implementation changes or GPU benchmarks were made during this review. The deployment notes below retain their historical March 2026 status.
