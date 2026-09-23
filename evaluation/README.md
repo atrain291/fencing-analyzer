@@ -89,6 +89,8 @@ The Python regression suite generates real lossless VFR and rotated, nonzero-sta
 
 On 2026-09-23, all three official checkpoints completed one-frame CPU smoke runs on Windows with Python 3.12.14 and PyTorch 2.8.0+cpu/torchvision 0.23.0+cpu. Additional runs at an intentionally tiny detection threshold exercised nonempty output conversion. These generated-image runs validate API integration only, not detection quality or GPU speed. The offline report was also checked in Chrome for synchronized playback and frame stepping. A GPU run on representative fencing footage, production-container validation, and a visual fullscreen check of the existing application remain outstanding.
 
+The same checkpoints subsequently passed CUDA integration checks on Omarchy's RTX 4070 SUPER, and the 22 Python tests passed there. The [Omarchy runtime record](omarchy-runtime-2026-09-23.md) preserves the environment, evidence, and resume commands. Actual fencing footage is still pending its folder path.
+
 Supervision 0.30.5 warns that its ByteTrack implementation will be removed in 0.31.0, and Ultralytics warns that `half` will be replaced by `quantize`. Keep the tested pins for this pilot; revalidate those APIs when upgrading.
 
 The worker now decodes in software to preserve timestamps, replacing the timestamp-discarding raw NVDEC pipe. Measure this end-to-end trade-off before deployment. Its conservative participant map initializes only when exactly two tracked people are present and labels them left/right at that moment; it does not identify the uploaded fencer profile, choose among a crowd, or recover lost IDs automatically. Full participant selection/correction remains future work. No live services are restarted by these tools.

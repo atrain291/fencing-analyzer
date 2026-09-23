@@ -92,7 +92,8 @@ Interfaces and behavior: consume existing `Frame`/`Keypoint` API types; use medi
 
 - [x] Review completed task diffs and resolve correctness findings with focused regressions.
 - [x] Run the Python suite, frontend tests/build, and `git diff --check` once on the integrated result.
-- [ ] Establish SSH key access to `adeitz@omarchy`, locate authorized bout files and GPU, and run a short pilot in an isolated evaluation directory. Avoid existing app services and database writes.
+- [x] Establish SSH key access to `adeitz@omarchy` and validate the isolated GPU environment with regression tests and model API checks.
+- [ ] Locate authorized bout files and run a short pilot in the isolated evaluation directory. Avoid existing app services and database writes.
 - [x] If remote authentication remains unavailable, preserve exact runnable commands and report the unresolved real-footage validation explicitly. Do not label the model comparison complete.
 - [x] Record results, commit verified work, and report artifact paths and the next concrete action.
 
@@ -104,3 +105,7 @@ Interfaces and behavior: consume existing `Frame`/`Keypoint` API types; use medi
 - Chrome: offline report source loading, frame stepping, playback, and equal-time rendering across three synthetic panels checked; no page errors after the final report refresh. Screenshot under ignored `output/playwright/pose-comparison.png`.
 - Independent review found annotation-hash comparability and stale navigation-state issues; both were fixed with regressions and re-reviewed without further findings.
 - Real footage is pending SSH authentication to `adeitz@omarchy` and the source directory. No GPU benchmark, deployment/container check, or application fullscreen visual check has been completed. See `evaluation/README.md` for exact run commands and remaining limits.
+
+### Omarchy follow-up
+
+SSH access was subsequently established. An isolated checkout and Python 3.12.14/PyTorch 2.8.0+cu128 environment are ready at `/home/adeitz/source/fencing-pose-evaluation`. All 22 Python tests and all three checkpoints' CUDA API checks passed, including nonempty COCO-17 output conversion. Source and checkpoint hashes match the CPU checks. See `evaluation/omarchy-runtime-2026-09-23.md` for details. The remaining input is the footage folder; no real-bout benchmark has run yet.
